@@ -152,19 +152,22 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		});
 	});
 
-	it("does not use snapcompact for a vision model under the default preference order", async () => {
+	it("hands off instead of snapcompacting a vision model under the default preference order", async () => {
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
 			methodOrder: null,
 		});
 		session = harness.session;
+		const handoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockResolvedValue("## Goal\nContinue from here");
 		harness.triggerThreshold();
 
 		const result = await harness.awaitCompactionEnd();
 
-		// Under the old default, snapcompact was the first eligible method here.
-		expect(result.action).not.toBe("snapcompact");
-		expect(harness.sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
+		expect(result).toEqual({ action: "handoff", errorMessage: undefined });
+		expect(handoffSpy).toHaveBeenCalledTimes(1);
+		expect(compactionModule.compact).not.toHaveBeenCalled();
 	});
 
 	it("uses OpenAI server compaction before local fallback methods by default", async () => {

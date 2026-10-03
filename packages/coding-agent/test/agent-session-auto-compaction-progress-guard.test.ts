@@ -134,6 +134,9 @@ describe("AgentSession auto-compaction progress guard", () => {
 			settings: Settings.isolated({
 				// Auto-continue ON so the guarded auto-continue path is exercised.
 				"compaction.autoContinue": true,
+				// Pin the summarizing chain so start counts measure the guard, not how
+				// many local fallbacks (shake) the default order walks through first.
+				"compaction.methodOrder": ["remote", "handoff", "soft"],
 			}),
 			modelRegistry,
 			extensionRunner: extensionRunner as never,

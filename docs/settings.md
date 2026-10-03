@@ -749,7 +749,7 @@ contextPromotion:
 
 compaction:
   enabled: true
-  methodOrder: [remote, snapcompact, handoff, shake, soft]
+  methodOrder: [remote, handoff, shake, soft]
   midTurnEnabled: true # check thresholds between tool-loop provider requests
   thresholdPercent: -1 # -1 = default reserve-based behavior
   thresholdTokens: -1 # fixed token limit when > 0
