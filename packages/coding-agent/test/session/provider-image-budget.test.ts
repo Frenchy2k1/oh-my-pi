@@ -223,6 +223,16 @@ describe("provider context image budgets", () => {
 		expect(imageData(context)).toHaveLength(1);
 	});
 
+	it("leaves an omission marker when an oversized image-only prompt is dropped", () => {
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [{ role: "user", content: [image("A".repeat(28_000_000))], timestamp: 0 }],
+		};
+		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
+		expect(clamped.messages[0]?.content).toEqual([text("[image omitted: provider image limit]")]);
+	});
+
 	it("does not charge URL or Anthropic file references for inline bytes", () => {
 		const referenceData = "A".repeat(25_000_000);
 		const context: Context = {

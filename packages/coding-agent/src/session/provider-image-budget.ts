@@ -18,7 +18,7 @@ import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "@oh-my-pi/pi-tui/chat/image-loading";
 
-const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
+const IMAGE_OMISSION: TextContent = {
 	type: "text",
 	text: "[image omitted: provider image limit]",
 };
@@ -58,7 +58,9 @@ function clampContent(
 		}
 		clamped?.push(part);
 	}
-	return clamped;
+	// An image-only message would otherwise go out empty; converters skip
+	// zero-block messages, silently losing the turn (e.g. an oversized pasted image).
+	return clamped && clamped.length === 0 ? [IMAGE_OMISSION] : clamped;
 }
 
 function clampUserMessage(message: UserMessage, state: ImageBudgetState): UserMessage {
@@ -76,8 +78,7 @@ function clampDeveloperMessage(message: DeveloperMessage, state: ImageBudgetStat
 function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetState): ToolResultMessage {
 	if (!needsImageDrop(state)) return message;
 	const content = clampContent(message.content, state);
-	if (!content) return message;
-	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
+	return content ? { ...message, content } : message;
 }
 
 function clampImages(context: Context, state: ImageBudgetState): Context {
