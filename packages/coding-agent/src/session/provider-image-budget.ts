@@ -11,6 +11,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
+import { resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { providerImageBudget } from "@oh-my-pi/snapcompact";
@@ -22,61 +23,81 @@ const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
 	text: "[image omitted: provider image limit]",
 };
 
-function countImages(context: Context): number {
-	let count = 0;
-	for (const message of context.messages) {
-		if (!Array.isArray(message.content)) continue;
-		for (const part of message.content) {
-			if (part.type === "image") count++;
-		}
-	}
-	return count;
+function inlineAnthropicImageBytes(image: ImageContent, model: Model): number {
+	// Match the reference/inline decision shared with the outbound image guard.
+	if (!sendsInlineImageBytes(image, model)) return 0;
+	return image.data.length; // Base64 is ASCII, so character count equals JSON byte count.
+}
+
+interface ImageBudgetState {
+	remainingDrops: number;
+	inlineBytes: number;
+	byteBudget: number;
+	model: Model;
+}
+
+function needsImageDrop(state: ImageBudgetState): boolean {
+	return state.remainingDrops > 0 || state.inlineBytes > state.byteBudget;
 }
 
 function clampContent(
 	content: readonly (TextContent | ImageContent)[],
-	state: { remainingDrops: number },
+	state: ImageBudgetState,
 ): (TextContent | ImageContent)[] | undefined {
-	let changed = false;
-	const clamped: (TextContent | ImageContent)[] = [];
-	for (const part of content) {
-		if (part.type === "image" && state.remainingDrops > 0) {
-			state.remainingDrops--;
-			changed = true;
-			continue;
+	let clamped: (TextContent | ImageContent)[] | undefined;
+	for (let index = 0; index < content.length; index++) {
+		const part = content[index];
+		if (part.type === "image" && needsImageDrop(state)) {
+			const bytes = state.byteBudget === Number.POSITIVE_INFINITY ? 0 : inlineAnthropicImageBytes(part, state.model);
+			if (state.remainingDrops > 0 || (state.inlineBytes > state.byteBudget && bytes > 0)) {
+				clamped ??= content.slice(0, index);
+				if (state.remainingDrops > 0) state.remainingDrops--;
+				state.inlineBytes -= bytes;
+				continue;
+			}
 		}
-		clamped.push(part);
+		clamped?.push(part);
 	}
-	return changed ? clamped : undefined;
+	return clamped;
 }
 
-function clampUserMessage(message: UserMessage, state: { remainingDrops: number }): UserMessage {
-	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
+function clampUserMessage(message: UserMessage, state: ImageBudgetState): UserMessage {
+	if (!Array.isArray(message.content) || !needsImageDrop(state)) return message;
 	const content = clampContent(message.content, state);
 	return content ? { ...message, content, providerPayload: undefined } : message;
 }
 
-function clampDeveloperMessage(message: DeveloperMessage, state: { remainingDrops: number }): DeveloperMessage {
-	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
+function clampDeveloperMessage(message: DeveloperMessage, state: ImageBudgetState): DeveloperMessage {
+	if (!Array.isArray(message.content) || !needsImageDrop(state)) return message;
 	const content = clampContent(message.content, state);
 	return content ? { ...message, content, providerPayload: undefined } : message;
 }
 
-function clampToolResultMessage(message: ToolResultMessage, state: { remainingDrops: number }): ToolResultMessage {
-	if (state.remainingDrops <= 0) return message;
+function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetState): ToolResultMessage {
+	if (!needsImageDrop(state)) return message;
 	const content = clampContent(message.content, state);
 	if (!content) return message;
 	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
 }
 
-/** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap. */
+/** Drops oldest transient image blocks to meet provider image count and inline-byte budgets. */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const limit = providerImageBudget(model.provider);
-	const totalImages = countImages(context);
-	if (totalImages <= limit) return context;
+	const byteBudget = resolveInlineImageByteBudget(model) ?? Number.POSITIVE_INFINITY;
+	let totalImages = 0;
+	let inlineBytes = 0;
+	for (const message of context.messages) {
+		if (!Array.isArray(message.content)) continue;
+		for (const part of message.content) {
+			if (part.type !== "image") continue;
+			totalImages++;
+			if (byteBudget !== Number.POSITIVE_INFINITY) inlineBytes += inlineAnthropicImageBytes(part, model);
+		}
+	}
+	const remainingDrops = totalImages - providerImageBudget(model.provider);
+	if (remainingDrops <= 0 && inlineBytes <= byteBudget) return context;
 
-	const state = { remainingDrops: totalImages - limit };
+	const state: ImageBudgetState = { remainingDrops, inlineBytes, byteBudget, model };
 	const messages = context.messages.map(message => {
 		switch (message.role) {
 			case "user":

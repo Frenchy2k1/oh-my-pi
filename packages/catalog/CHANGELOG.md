@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic requests carrying too many inline screenshot bytes by exposing a provider image-byte budget ([#14453](https://github.com/can1357/oh-my-pi/issues/14453)).
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed
