@@ -589,15 +589,38 @@ export interface SharedBrowserLaunchSpec {
 const SNAP_BIN_DIRS: Record<string, true> = { "/snap/bin": true, "/var/lib/snapd/snap/bin": true };
 
 /**
- * `$SNAP_USER_COMMON` of the snap behind a `<snap bin>/<snap>[.<app>]` launcher,
- * or undefined for executables that are not Snap launchers. Strict confinement
- * denies a snap writes to hidden home dirs such as `~/.omp`; this
- * revision-independent dir stays writable and survives snap refreshes.
+ * `$SNAP_USER_COMMON` for a Snap launcher, including symlink aliases and
+ * shell wrappers that exec the launcher (as Ubuntu's chromium-browser does).
+ * Strict confinement denies writes to hidden home dirs such as `~/.omp`.
  */
-function snapUserCommonDir(executablePath: string): string | undefined {
-	if (!Object.hasOwn(SNAP_BIN_DIRS, path.dirname(executablePath))) return undefined;
-	const snap = path.basename(executablePath).split(".", 1)[0]!;
-	return path.join(os.homedir(), "snap", snap, "common");
+async function snapUserCommonDir(executablePath: string): Promise<string | undefined> {
+	let candidate = path.resolve(executablePath);
+	for (let depth = 0; depth < 8; depth++) {
+		if (Object.hasOwn(SNAP_BIN_DIRS, path.dirname(candidate))) {
+			const snap = path.basename(candidate).split(".", 1)[0]!;
+			return path.join(os.homedir(), "snap", snap, "common");
+		}
+		try {
+			const stat = await fs.promises.lstat(candidate);
+			if (stat.isSymbolicLink()) {
+				candidate = path.resolve(path.dirname(candidate), await fs.promises.readlink(candidate));
+				continue;
+			}
+			if (!stat.isFile() || stat.size > 16_384) return undefined;
+			const script = await Bun.file(candidate).text();
+			if (!script.startsWith("#!")) return undefined;
+			// The Ubuntu transition package ends with `exec /snap/bin/chromium "$@"`.
+			// Only a literal exec forwarding argv proves this wrapper launches a snap.
+			const delegate = script.match(
+				/^[ \t]*exec[ \t]+(?:(\/(?:snap\/bin|var\/lib\/snapd\/snap\/bin)\/[a-zA-Z0-9._-]+)|(?:\/usr\/bin\/)?snap[ \t]+run[ \t]+([a-zA-Z0-9._-]+))[ \t]+"\$@"[ \t]*$/m,
+			);
+			if (!delegate) return undefined;
+			candidate = delegate[1] ?? path.join("/snap/bin", delegate[2]!);
+		} catch {
+			return undefined;
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -620,7 +643,7 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
 	const puppeteer = await loadPuppeteer();
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	const ignored = new Set(stealthIgnoreDefaultArgs(executablePath));
-	const snapCommon = snapUserCommonDir(executablePath);
+	const snapCommon = await snapUserCommonDir(executablePath);
 	const userDataDir = snapCommon ? path.join(snapCommon, "omp", opts.userDataDir) : opts.userDataDir;
 	const defaults = await puppeteer.defaultArgs({
 		headless: opts.headless,

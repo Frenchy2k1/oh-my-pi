@@ -84,6 +84,44 @@ describe("shared browser launch", () => {
 			expect(launch?.args).toContain(`--user-data-dir=${expected}`);
 		}
 	});
+
+	it.skipIf(process.platform !== "linux")(
+		"recognizes Ubuntu's Chromium transition wrapper and Snap aliases",
+		async () => {
+			const dir = TempDir.createSync("@snap-chromium-wrapper-");
+			try {
+				const wrapper = path.join(dir.path(), "chromium-browser");
+				const alias = path.join(dir.path(), "chromium-alias");
+				const snapRun = path.join(dir.path(), "chromium-snap-run");
+				const regular = path.join(dir.path(), "chromium");
+				const profile = path.join(dir.path(), ".omp/run/daemons/project/omp.browser.headless.profile");
+				await Bun.write(
+					wrapper,
+					'#!/bin/sh\nif [ "$1" = "--version" ]; then echo "Chromium 154"; exit 0; fi\nif ! [ -x /snap/bin/chromium ]; then exit 1; fi\nexec /snap/bin/chromium "$@"\n',
+				);
+				await Bun.write(snapRun, '#!/bin/sh\nexec snap run chromium "$@"\n');
+				await Bun.write(regular, '#!/bin/sh\n# exec /snap/bin/chromium "$@"\nexec /usr/bin/chromium "$@"\n');
+				fs.chmodSync(wrapper, 0o755);
+				fs.symlinkSync("chromium-browser", alias);
+				expect(await chromiumExecutableProbeForTest(wrapper)).toBe(true);
+				for (const executablePath of [wrapper, alias, snapRun]) {
+					const spec = await withExecutable(executablePath, () =>
+						resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
+					);
+					const expected = path.join(os.homedir(), "snap/chromium/common/omp", profile);
+					expect(spec?.userDataDir).toBe(expected);
+					expect(spec?.args).toContain(`--user-data-dir=${expected}`);
+				}
+				const native = await withExecutable(regular, () =>
+					resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
+				);
+				expect(native?.userDataDir).toBe(profile);
+				expect(native?.args).toContain(`--user-data-dir=${profile}`);
+			} finally {
+				await dir.remove();
+			}
+		},
+	);
 });
 
 const UNGOOGLED_CHROMIUM_FLATPAK_ID = "io.github.ungoogled_software.ungoogled_chromium";
