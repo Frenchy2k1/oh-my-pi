@@ -23,7 +23,7 @@ const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
 	text: "[image omitted: provider image limit]",
 };
 
-function inlineAnthropicImageBytes(image: ImageContent, model: Model): number {
+function inlineImageBytes(image: ImageContent, model: Model): number {
 	// Match the reference/inline decision shared with the outbound image guard.
 	if (!sendsInlineImageBytes(image, model)) return 0;
 	return image.data.length; // Base64 is ASCII, so character count equals JSON byte count.
@@ -48,7 +48,7 @@ function clampContent(
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		if (part.type === "image" && needsImageDrop(state)) {
-			const bytes = state.byteBudget === Number.POSITIVE_INFINITY ? 0 : inlineAnthropicImageBytes(part, state.model);
+			const bytes = state.byteBudget === Number.POSITIVE_INFINITY ? 0 : inlineImageBytes(part, state.model);
 			if (state.remainingDrops > 0 || (state.inlineBytes > state.byteBudget && bytes > 0)) {
 				clamped ??= content.slice(0, index);
 				if (state.remainingDrops > 0) state.remainingDrops--;
@@ -80,24 +80,7 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetSt
 	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
 }
 
-/** Drops oldest transient image blocks to meet provider image count and inline-byte budgets. */
-export function clampProviderContextImages(context: Context, model: Model): Context {
-	if (!model.input.includes("image")) return context;
-	const byteBudget = resolveInlineImageByteBudget(model) ?? Number.POSITIVE_INFINITY;
-	let totalImages = 0;
-	let inlineBytes = 0;
-	for (const message of context.messages) {
-		if (!Array.isArray(message.content)) continue;
-		for (const part of message.content) {
-			if (part.type !== "image") continue;
-			totalImages++;
-			if (byteBudget !== Number.POSITIVE_INFINITY) inlineBytes += inlineAnthropicImageBytes(part, model);
-		}
-	}
-	const remainingDrops = totalImages - providerImageBudget(model.provider);
-	if (remainingDrops <= 0 && inlineBytes <= byteBudget) return context;
-
-	const state: ImageBudgetState = { remainingDrops, inlineBytes, byteBudget, model };
+function clampImages(context: Context, state: ImageBudgetState): Context {
 	const messages = context.messages.map(message => {
 		switch (message.role) {
 			case "user":
@@ -112,6 +95,40 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 		return message;
 	});
 	return { ...context, messages };
+}
+
+/** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap. */
+export function clampProviderContextImages(context: Context, model: Model): Context {
+	if (!model.input.includes("image")) return context;
+	let totalImages = 0;
+	for (const message of context.messages) {
+		if (!Array.isArray(message.content)) continue;
+		for (const part of message.content) {
+			if (part.type === "image") totalImages++;
+		}
+	}
+	const remainingDrops = totalImages - providerImageBudget(model.provider);
+	if (remainingDrops <= 0) return context;
+	return clampImages(context, { remainingDrops, inlineBytes: 0, byteBudget: Number.POSITIVE_INFINITY, model });
+}
+
+/**
+ * Drops oldest inline image blocks so their base64 fits the deployment's request-body budget.
+ * Runs after URL/provider-file decoration: blocks the provider receives as references carry no inline bytes.
+ */
+export function clampProviderContextImageBytes(context: Context, model: Model): Context {
+	if (!model.input.includes("image")) return context;
+	const byteBudget = resolveInlineImageByteBudget(model);
+	if (byteBudget === undefined) return context;
+	let inlineBytes = 0;
+	for (const message of context.messages) {
+		if (!Array.isArray(message.content)) continue;
+		for (const part of message.content) {
+			if (part.type === "image") inlineBytes += inlineImageBytes(part, model);
+		}
+	}
+	if (inlineBytes <= byteBudget) return context;
+	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model });
 }
 
 /**

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { Context, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { clampProviderContextImages } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
+import { decorateContextImages } from "@oh-my-pi/pi-coding-agent/blob-broker/context-images";
+import {
+	clampProviderContextImageBytes,
+	clampProviderContextImages,
+} from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
 
 const UMANS_MODEL = buildModel({
 	id: "umans-glm-5.2",
@@ -158,13 +162,13 @@ describe("provider context image budgets", () => {
 				{ role: "developer", content: [text("middle"), image(HALF_ANTHROPIC_IMAGE_BUDGET)], timestamp: 1 },
 			],
 		};
-		expect(clampProviderContextImages(context, ANTHROPIC_MODEL)).toBe(context);
+		expect(clampProviderContextImageBytes(context, ANTHROPIC_MODEL)).toBe(context);
 
 		const overBudget: Context = {
 			...context,
 			messages: [...context.messages, { role: "user", content: [text("new"), image("AAAA")], timestamp: 2 }],
 		};
-		const clamped = clampProviderContextImages(overBudget, ANTHROPIC_MODEL);
+		const clamped = clampProviderContextImageBytes(overBudget, ANTHROPIC_MODEL);
 		expect(clamped).not.toBe(overBudget);
 		expect(clamped.messages[0]).toEqual({ role: "user", content: [text("old")], timestamp: 0 });
 		expect(clamped.messages[1]).toBe(overBudget.messages[1]);
@@ -189,7 +193,7 @@ describe("provider context image budgets", () => {
 				timestamp: index,
 			})),
 		};
-		const clamped = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
 		const keptImages = imageData(clamped);
 		expect(keptImages).toHaveLength(44);
 		expect(keptImages.reduce((size, data) => size + data.length, 0)).toBe(23_496_000);
@@ -214,7 +218,7 @@ describe("provider context image budgets", () => {
 				},
 			],
 		};
-		const clamped = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
 		expect(clamped.messages[0]?.content).toEqual([text("[image omitted: provider image limit]")]);
 		expect(imageData(context)).toHaveLength(1);
 	});
@@ -235,7 +239,7 @@ describe("provider context image budgets", () => {
 				},
 			],
 		};
-		expect(clampProviderContextImages(context, ANTHROPIC_MODEL)).toBe(context);
+		expect(clampProviderContextImageBytes(context, ANTHROPIC_MODEL)).toBe(context);
 	});
 
 	it("keeps older external references while removing later inline bytes, but still counts references", () => {
@@ -249,7 +253,7 @@ describe("provider context image budgets", () => {
 				{ role: "user", content: [text("new"), oversized], timestamp: 1 },
 			],
 		};
-		const clamped = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
 		expect(clamped.messages[0]).toBe(context.messages[0]);
 		expect(clamped.messages[1]?.content).toEqual([text("new")]);
 		expect(textData(clamped)).toEqual(["old", "new"]);
@@ -282,9 +286,28 @@ describe("provider context image budgets", () => {
 				},
 			],
 		};
-		expect(clampProviderContextImages(context, UMANS_MODEL)).toBe(context);
-		expect(clampProviderContextImages(context, { ...ANTHROPIC_MODEL, api: "openai-responses" })).toBe(context);
-		expect(clampProviderContextImages(context, { ...ANTHROPIC_MODEL, input: ["text"] })).toBe(context);
+		expect(clampProviderContextImageBytes(context, UMANS_MODEL)).toBe(context);
+		expect(clampProviderContextImageBytes(context, { ...ANTHROPIC_MODEL, api: "openai-responses" })).toBe(context);
+		expect(clampProviderContextImageBytes(context, { ...ANTHROPIC_MODEL, input: ["text"] })).toBe(context);
+	});
+
+	it("keeps images that URL decoration moved off the inline wire", () => {
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: Array.from({ length: 62 }, (_, index) => ({
+				role: "toolResult",
+				toolCallId: `call-${index}`,
+				toolName: "screenshot",
+				content: [image("A".repeat(534_000))],
+				isError: false,
+				timestamp: index,
+			})),
+		};
+		const decorated = decorateContextImages(context, () => "https://images.example/frame.png");
+
+		expect(imageData(clampProviderContextImageBytes(context, ANTHROPIC_MODEL))).toHaveLength(44);
+		expect(clampProviderContextImageBytes(decorated, ANTHROPIC_MODEL)).toBe(decorated);
 	});
 
 	it("preserves context identity when the provider cap is not exceeded", () => {
