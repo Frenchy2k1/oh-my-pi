@@ -577,10 +577,27 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	}
 }
 
-/** Fully resolved executable and argv for a broker-spawned shared Chromium. */
+/** Fully resolved executable, argv, and profile for a broker-spawned shared Chromium. */
 export interface SharedBrowserLaunchSpec {
 	executablePath: string;
 	args: string[];
+	/** Profile directory named in `args`; the caller creates it before starting the daemon. */
+	userDataDir: string;
+}
+
+/** Launcher dirs snapd populates: `/snap/bin` (Ubuntu, Debian) and `/var/lib/snapd/snap/bin` (Fedora, Arch). */
+const SNAP_BIN_DIRS: Record<string, true> = { "/snap/bin": true, "/var/lib/snapd/snap/bin": true };
+
+/**
+ * `$SNAP_USER_COMMON` of the snap behind a `<snap bin>/<snap>[.<app>]` launcher,
+ * or undefined for executables that are not Snap launchers. Strict confinement
+ * denies a snap writes to hidden home dirs such as `~/.omp`; this
+ * revision-independent dir stays writable and survives snap refreshes.
+ */
+function snapUserCommonDir(executablePath: string): string | undefined {
+	if (!Object.hasOwn(SNAP_BIN_DIRS, path.dirname(executablePath))) return undefined;
+	const snap = path.basename(executablePath).split(".", 1)[0]!;
+	return path.join(os.homedir(), "snap", snap, "common");
 }
 
 /**
@@ -588,8 +605,10 @@ export interface SharedBrowserLaunchSpec {
  * broker spawns directly (no puppeteer inside the broker). Mirrors
  * `launchHeadlessBrowser` flag assembly — puppeteer's default args minus the
  * stealth-suppressed set — suppresses Puppeteer's unowned startup window, and
- * exposes CDP on an ephemeral port. Returns null when no executable resolves;
- * callers fall back to a process-local launch.
+ * exposes CDP on an ephemeral port. A Snap-confined Chromium cannot write
+ * `opts.userDataDir`, so its profile moves to the same path mirrored under the
+ * snap's common dir, keeping it per-project and isolated. Returns null when no
+ * executable resolves; callers fall back to a process-local launch.
  */
 export async function resolveSharedBrowserLaunchSpec(opts: {
 	headless: boolean;
@@ -601,14 +620,17 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
 	const puppeteer = await loadPuppeteer();
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	const ignored = new Set(stealthIgnoreDefaultArgs(executablePath));
+	const snapCommon = snapUserCommonDir(executablePath);
+	const userDataDir = snapCommon ? path.join(snapCommon, "omp", opts.userDataDir) : opts.userDataDir;
 	const defaults = await puppeteer.defaultArgs({
 		headless: opts.headless,
 		args: buildHeadlessLaunchArgs(vp),
-		userDataDir: opts.userDataDir,
+		userDataDir,
 	});
 	return {
 		executablePath,
 		args: [...defaults.filter(arg => !ignored.has(arg)), "--no-startup-window", "--remote-debugging-port=0"],
+		userDataDir,
 	};
 }
 

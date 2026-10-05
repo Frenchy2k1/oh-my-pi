@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
 	chromiumExecutableProbeForTest,
@@ -49,19 +50,38 @@ describe("browser launch stealth defaults", () => {
 });
 
 describe("shared browser launch", () => {
-	it("suppresses the broker-owned blank startup window", async () => {
+	const withExecutable = async <T>(executablePath: string, run: () => Promise<T>): Promise<T> => {
 		const previousExecutable = process.env.PUPPETEER_EXECUTABLE_PATH;
-		process.env.PUPPETEER_EXECUTABLE_PATH = "/test/chrome";
+		process.env.PUPPETEER_EXECUTABLE_PATH = executablePath;
 		try {
-			const launch = await resolveSharedBrowserLaunchSpec({
-				headless: true,
-				userDataDir: "/test/profile",
-			});
-
-			expect(launch?.args).toContain("--no-startup-window");
+			return await run();
 		} finally {
 			if (previousExecutable === undefined) delete process.env.PUPPETEER_EXECUTABLE_PATH;
 			else process.env.PUPPETEER_EXECUTABLE_PATH = previousExecutable;
+		}
+	};
+
+	it("suppresses the broker-owned blank startup window", async () => {
+		const launch = await withExecutable("/test/chrome", () =>
+			resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: "/test/profile" }),
+		);
+
+		expect(launch?.args).toContain("--no-startup-window");
+	});
+
+	it("places a Snap-confined Chromium's profile under the snap's revision-independent common dir", async () => {
+		const profile = "/home/test/.omp/run/daemons/abc/omp.browser.headless.profile";
+		for (const [executablePath, expected] of [
+			["/snap/bin/chromium", path.join(os.homedir(), "snap/chromium/common/omp", profile)],
+			["/var/lib/snapd/snap/bin/chromium", path.join(os.homedir(), "snap/chromium/common/omp", profile)],
+			["/usr/bin/chromium", profile],
+		] as const) {
+			const launch = await withExecutable(executablePath, () =>
+				resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
+			);
+
+			expect(launch?.userDataDir).toBe(expected);
+			expect(launch?.args).toContain(`--user-data-dir=${expected}`);
 		}
 	});
 });
