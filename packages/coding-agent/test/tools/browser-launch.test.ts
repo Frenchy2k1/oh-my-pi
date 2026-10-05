@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -82,6 +82,35 @@ describe("shared browser launch", () => {
 
 			expect(launch?.userDataDir).toBe(expected);
 			expect(launch?.args).toContain(`--user-data-dir=${expected}`);
+		}
+	});
+
+	it("uses snapd's active alias owner instead of the launcher filename", async () => {
+		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+			Response.json({
+				type: "sync",
+				result: {
+					chromium: {
+						chrome: { command: "chromium.chromium", status: "manual" },
+						chromium: { command: "chromium.chromium", status: "auto" },
+					},
+				},
+			}),
+		);
+		try {
+			const profile = "/home/test/.omp/run/daemons/abc/omp.browser.headless.profile";
+			const launch = await withExecutable("/snap/bin/chrome", () =>
+				resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
+			);
+			const expected = path.join(os.homedir(), "snap/chromium/common/omp", profile);
+			expect(launch?.userDataDir).toBe(expected);
+			expect(launch?.args).toContain(`--user-data-dir=${expected}`);
+			expect(fetchSpy).toHaveBeenCalledWith(
+				"http://snapd.local/v2/aliases",
+				expect.objectContaining({ unix: "/run/snapd.socket" }),
+			);
+		} finally {
+			fetchSpy.mockRestore();
 		}
 	});
 

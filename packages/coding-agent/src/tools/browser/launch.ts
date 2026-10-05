@@ -588,6 +588,38 @@ export interface SharedBrowserLaunchSpec {
 /** Launcher dirs snapd populates: `/snap/bin` (Ubuntu, Debian) and `/var/lib/snapd/snap/bin` (Fedora, Arch). */
 const SNAP_BIN_DIRS: Record<string, true> = { "/snap/bin": true, "/var/lib/snapd/snap/bin": true };
 
+/** A snapd alias has the same `/snap/bin/<name> -> snap` symlink as a primary app. */
+async function snapNameForCommand(command: string): Promise<string> {
+	try {
+		const response = await fetch("http://snapd.local/v2/aliases", {
+			unix: "/run/snapd.socket",
+			signal: AbortSignal.timeout(1_000),
+		});
+		if (response.ok) {
+			const payload: unknown = await response.json();
+			if (isRecord(payload) && isRecord(payload.result)) {
+				for (const snap in payload.result) {
+					if (!Object.hasOwn(payload.result, snap)) continue;
+					const aliases = payload.result[snap];
+					if (!isRecord(aliases) || !Object.hasOwn(aliases, command)) continue;
+					const alias = aliases[command];
+					if (
+						isRecord(alias) &&
+						(alias.status === "manual" || alias.status === "auto") &&
+						typeof alias.command === "string" &&
+						(alias.command === snap || alias.command.startsWith(`${snap}.`))
+					) {
+						return snap;
+					}
+				}
+			}
+		}
+	} catch {
+		// Primary snap launchers still work when snapd's alias service is unavailable.
+	}
+	return command.split(".", 1)[0]!;
+}
+
 /**
  * `$SNAP_USER_COMMON` for a Snap launcher, including symlink aliases and
  * shell wrappers that exec the launcher (as Ubuntu's chromium-browser does).
@@ -597,7 +629,7 @@ async function snapUserCommonDir(executablePath: string): Promise<string | undef
 	let candidate = path.resolve(executablePath);
 	for (let depth = 0; depth < 8; depth++) {
 		if (Object.hasOwn(SNAP_BIN_DIRS, path.dirname(candidate))) {
-			const snap = path.basename(candidate).split(".", 1)[0]!;
+			const snap = await snapNameForCommand(path.basename(candidate));
 			return path.join(os.homedir(), "snap", snap, "common");
 		}
 		try {
