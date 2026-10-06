@@ -36,6 +36,10 @@ describe("MCP bridge embedded resource blobs (#14598)", () => {
 			{ type: "text", text: "[Resource: example://image/1]" },
 			{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
 		]);
+		// The payload now lives in the image block; details keep only provenance.
+		expect(result.details?.rawContent).toEqual([
+			{ type: "resource", resource: { uri: "example://image/1", mimeType: "IMAGE/PNG; charset=binary" } },
+		]);
 	});
 
 	it("saves a non-image blob under local:// with its decoded bytes and reports MIME and size", async () => {
@@ -53,6 +57,9 @@ describe("MCP bridge embedded resource blobs (#14598)", () => {
 		expect(text).toBe(`[Resource: waplugin://media/42]\naudio/ogg payload (7B) saved to ${url}`);
 		const filePath = await InternalUrlRouter.instance().locate(url!, { localProtocolOptions });
 		expect(new Uint8Array(await Bun.file(filePath!).arrayBuffer())).toEqual(audio);
+		expect(result.details?.rawContent).toEqual([
+			{ type: "resource", resource: { uri: "waplugin://media/42", mimeType: "audio/ogg" } },
+		]);
 	});
 
 	it("saves a zero-byte blob as an empty file instead of an empty image block", async () => {

@@ -197,25 +197,27 @@ async function prepareOutboundArgs(
  * Render an embedded resource's binary payload. Supported images become image
  * blocks; any other blob is decoded into the session `local://` root so tools
  * can open it, and the text reports where it went. The server-supplied URI is
- * provenance only — it need not be fetchable.
+ * provenance only — it need not be fetchable. `delivered` is true when the
+ * payload now lives in the result (image block) or on disk, so the caller can
+ * drop the base64 copy from `details.rawContent`.
  */
 async function formatResourceBlob(
 	uri: string,
 	blob: string,
 	mimeType: string | undefined,
 	context: CustomToolContext,
-): Promise<{ text: string; image?: ImageContent }> {
+): Promise<{ text: string; image?: ImageContent; delivered: boolean }> {
 	const header = `[Resource: ${uri}]`;
 	const mime = mimeType?.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
 	// An empty payload is a valid zero-byte attachment but never a decodable image.
 	if (blob.length > 0 && SUPPORTED_IMAGE_MIME_TYPES.has(mime)) {
-		return { text: header, image: { type: "image", data: blob, mimeType: mime } };
+		return { text: header, image: { type: "image", data: blob, mimeType: mime }, delivered: true };
 	}
 	let bytes: Uint8Array;
 	try {
 		bytes = Uint8Array.fromBase64(blob);
 	} catch {
-		return { text: `${header}\n${mime} payload dropped: invalid base64 blob.` };
+		return { text: `${header}\n${mime} payload dropped: invalid base64 blob.`, delivered: false };
 	}
 	const size = formatBytes(bytes.length);
 	const subtype = mime
@@ -235,20 +237,23 @@ async function formatResourceBlob(
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		logger.warn("Failed to save MCP resource blob", { uri, mimeType: mime, error: reason });
-		return { text: `${header}\n${mime} payload (${size}) could not be saved: ${reason}` };
+		return { text: `${header}\n${mime} payload (${size}) could not be saved: ${reason}`, delivered: false };
 	}
-	return { text: `${header}\n${mime} payload (${size}) saved to ${url}` };
+	return { text: `${header}\n${mime} payload (${size}) saved to ${url}`, delivered: true };
 }
 
 /**
  * Convert MCP content to agent content while retaining image payloads and
  * making embedded binary resources reachable (see {@link formatResourceBlob}).
+ * `rawContent` is the input minus every resource blob already delivered, so
+ * session details never carry a second base64 copy of the payload.
  */
 async function formatMCPContent(
 	content: MCPContent[],
 	context: CustomToolContext,
-): Promise<Array<TextContent | ImageContent>> {
+): Promise<{ content: Array<TextContent | ImageContent>; rawContent: MCPContent[] }> {
 	const blocks: Array<TextContent | ImageContent> = [];
+	let rawContent = content;
 	let text = "";
 	const flushText = () => {
 		if (!text) return;
@@ -259,7 +264,7 @@ async function formatMCPContent(
 		text += text ? `\n\n${value}` : value;
 	};
 
-	for (const item of content) {
+	for (const [index, item] of content.entries()) {
 		switch (item.type) {
 			case "text":
 				appendText(item.text);
@@ -284,12 +289,17 @@ async function formatMCPContent(
 					flushText();
 					blocks.push(formatted.image);
 				}
+				if (formatted.delivered) {
+					if (rawContent === content) rawContent = content.slice();
+					const { blob: _delivered, ...retained } = item.resource;
+					rawContent[index] = { ...item, resource: retained };
+				}
 				break;
 			}
 		}
 	}
 	flushText();
-	return blocks.length > 0 ? blocks : [{ type: "text", text: "" }];
+	return { content: blocks.length > 0 ? blocks : [{ type: "text", text: "" }], rawContent };
 }
 
 /**
@@ -339,12 +349,12 @@ async function buildResult(
 	provider?: string,
 	providerName?: string,
 ): Promise<CustomToolResult<MCPToolDetails>> {
-	const content = await formatMCPContent(result.content, context);
+	const { content, rawContent } = await formatMCPContent(result.content, context);
 	const details: MCPToolDetails = {
 		serverName,
 		mcpToolName,
 		isError: result.isError,
-		rawContent: result.content,
+		rawContent,
 		mcpMeta: result._meta,
 		provider,
 		providerName,
