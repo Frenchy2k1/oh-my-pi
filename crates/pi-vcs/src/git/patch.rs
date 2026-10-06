@@ -160,47 +160,51 @@ impl GitRepo {
 			&owned
 		};
 		let files = parse_patch(raw_diff).map_err(ApplyFailure::into_error)?;
-		let mut by_path = BTreeMap::new();
-		for file in &files {
-			if let Some(path) = file.new_path.as_ref().or(file.old_path.as_ref()) {
-				by_path.insert(path.as_str(), file);
-			}
-		}
+		let by_path = patches_by_path(&files);
 		let mut parts = Vec::with_capacity(selections.len());
 		for selection in selections {
-			let Some(file) = by_path.get(selection.path.as_str()) else {
+			let Some(files) = by_path.get(selection.path.as_str()) else {
 				return Err(Error::PatchFailed {
 					message: format!("No diff found for {}", selection.path),
 				});
 			};
-			if !file.binary.is_empty() {
-				if !matches!(selection.hunks, HunkSpec::All) {
-					return Err(Error::PatchFailed {
-						message: format!("Cannot select hunks for binary file {}", selection.path),
-					});
-				}
-				parts.push(file.raw.clone());
-				continue;
-			}
-			if matches!(selection.hunks, HunkSpec::All) {
-				parts.push(file.raw.clone());
-				continue;
-			}
-			let selected = select_hunks(file, &selection.hunks);
-			if selected.is_empty() {
+			// A gitlink/file conversion is a delete and create at one path;
+			// applying either half alone cannot produce a valid index entry.
+			if files.len() > 1 && !matches!(selection.hunks, HunkSpec::All) {
 				return Err(Error::PatchFailed {
-					message: format!("No hunks selected for {}", selection.path),
+					message: format!("Cannot select individual hunks for {}", selection.path),
 				});
 			}
-			let header = extract_file_header(&file.raw);
-			let mut part = header.to_owned();
-			for hunk in selected {
-				if !part.ends_with('\n') {
-					part.push('\n');
+			for file in files {
+				if !file.binary.is_empty() {
+					if !matches!(selection.hunks, HunkSpec::All) {
+						return Err(Error::PatchFailed {
+							message: format!("Cannot select hunks for binary file {}", selection.path),
+						});
+					}
+					parts.push(file.raw.clone());
+					continue;
 				}
-				part.push_str(&hunk.raw);
+				if matches!(selection.hunks, HunkSpec::All) {
+					parts.push(file.raw.clone());
+					continue;
+				}
+				let selected = select_hunks(file, &selection.hunks);
+				if selected.is_empty() {
+					return Err(Error::PatchFailed {
+						message: format!("No hunks selected for {}", selection.path),
+					});
+				}
+				let header = extract_file_header(&file.raw);
+				let mut part = header.to_owned();
+				for hunk in selected {
+					if !part.ends_with('\n') {
+						part.push('\n');
+					}
+					part.push_str(&hunk.raw);
+				}
+				parts.push(part);
 			}
-			parts.push(part);
 		}
 		let patch = join_patches(&parts);
 		self.apply_patch(&patch, &ApplyOptions {
@@ -515,33 +519,42 @@ pub fn validate_hunk_selections(
 	let Ok(files) = parse_patch(raw_diff) else {
 		return Vec::new();
 	};
-	let mut by_path = BTreeMap::new();
-	for file in &files {
-		if let Some(path) = file.new_path.as_ref().or(file.old_path.as_ref()) {
-			by_path.insert(path.as_str(), file);
-		}
-	}
+	let by_path = patches_by_path(&files);
 	let mut errors = Vec::new();
 	for selection in selections {
-		let Some(file) = by_path.get(selection.path.as_str()) else {
+		let Some(files) = by_path.get(selection.path.as_str()) else {
 			continue;
 		};
 		if matches!(selection.hunks, HunkSpec::All) {
 			continue;
 		}
-		if !file.binary.is_empty() {
-			errors.push(HunkSelectionError {
-				path:    selection.path.clone(),
-				message: format!("Cannot select hunks for binary file {}", selection.path),
-			});
-		} else if select_hunks(file, &selection.hunks).is_empty() {
-			errors.push(HunkSelectionError {
-				path:    selection.path.clone(),
-				message: format!("No hunks selected for {}", selection.path),
-			});
+		let message = if files.len() > 1 {
+			Some(format!("Cannot select individual hunks for {}", selection.path))
+		} else {
+			let file = files[0];
+			if !file.binary.is_empty() {
+				Some(format!("Cannot select hunks for binary file {}", selection.path))
+			} else if select_hunks(file, &selection.hunks).is_empty() {
+				Some(format!("No hunks selected for {}", selection.path))
+			} else {
+				None
+			}
+		};
+		if let Some(message) = message {
+			errors.push(HunkSelectionError { path: selection.path.clone(), message });
 		}
 	}
 	errors
+}
+
+fn patches_by_path(files: &[FilePatch]) -> BTreeMap<&str, Vec<&FilePatch>> {
+	let mut by_path: BTreeMap<&str, Vec<&FilePatch>> = BTreeMap::new();
+	for file in files {
+		if let Some(path) = file.new_path.as_ref().or(file.old_path.as_ref()) {
+			by_path.entry(path).or_default().push(file);
+		}
+	}
+	by_path
 }
 
 fn parse_patch(text: &str) -> std::result::Result<Vec<FilePatch>, ApplyFailure> {
@@ -2033,6 +2046,73 @@ mod tests {
 		assert!(status.contains("A  picked.txt"), "picked.txt staged: {status}");
 		assert!(status.contains("M  base.txt"), "base.txt staged: {status}");
 		assert!(status.contains(" A promised.txt"), "promised.txt keeps intent-to-add: {status}");
+	}
+
+	#[test]
+	fn stage_hunks_preserves_both_gitlink_type_change_patches() {
+		let to_file = init(&[("base.txt", b"base\n")]);
+		let pointer = git(to_file.path(), &["rev-parse", "HEAD"])
+			.trim()
+			.to_owned();
+		git(to_file.path(), &[
+			"update-index",
+			"--add",
+			"--cacheinfo",
+			&format!("160000,{pointer},sub"),
+		]);
+		git(to_file.path(), &["commit", "-qm", "gitlink"]);
+		fs::write(to_file.path().join("sub"), b"new file\n").expect("replace gitlink");
+		git(to_file.path(), &["add", "sub"]);
+		let git_repo = repo(to_file.path());
+		let diff = git_repo
+			.diff_text(&DiffOptions { cached: true, ..DiffOptions::default() })
+			.expect("staged gitlink to file diff");
+		assert_eq!(diff.matches("diff --git a/sub b/sub").count(), 2);
+		git_repo.unstage(&[]).expect("reset index for split commit");
+		let partial = [HunkSelection { path: "sub".into(), hunks: HunkSpec::Indices(vec![1]) }];
+		assert_eq!(validate_hunk_selections(&diff, &partial).len(), 1);
+		assert!(matches!(
+			git_repo.stage_hunks(&partial, Some(&diff)),
+			Err(Error::PatchFailed { message }) if message.contains("Cannot select individual hunks")
+		));
+		assert_eq!(git(to_file.path(), &["rev-parse", ":sub"]).trim(), pointer);
+		git_repo
+			.stage_hunks(&[HunkSelection { path: "sub".into(), hunks: HunkSpec::All }], Some(&diff))
+			.expect("stage gitlink to file");
+		assert_eq!(git(to_file.path(), &["show", ":sub"]), "new file\n");
+		assert!(git(to_file.path(), &["ls-files", "-s", "sub"]).starts_with("100644 "));
+
+		let to_link = init(&[("sub", b"old file\n")]);
+		fs::remove_file(to_link.path().join("sub")).expect("remove file");
+		let child = to_link.path().join("sub");
+		fs::create_dir(&child).expect("create submodule directory");
+		git(&child, &["init", "-q"]);
+		git(&child, &[
+			"-c",
+			"user.name=T",
+			"-c",
+			"user.email=t@e",
+			"commit",
+			"-q",
+			"--allow-empty",
+			"-m",
+			"child",
+		]);
+		let child_head = git(&child, &["rev-parse", "HEAD"]).trim().to_owned();
+		git(to_link.path(), &["add", "sub"]);
+		let repo = repo(to_link.path());
+		let diff = repo
+			.diff_text(&DiffOptions { cached: true, ..DiffOptions::default() })
+			.expect("staged file to gitlink diff");
+		assert_eq!(diff.matches("diff --git a/sub b/sub").count(), 2);
+		repo.unstage(&[]).expect("reset index for split commit");
+		repo
+			.stage_hunks(&[HunkSelection { path: "sub".into(), hunks: HunkSpec::All }], Some(&diff))
+			.expect("stage file to gitlink");
+		assert_eq!(
+			git(to_link.path(), &["ls-files", "-s", "sub"]),
+			format!("160000 {child_head} 0\tsub\n")
+		);
 	}
 
 	/// Gitlink patches carry `Subproject commit` text; applying them must move
