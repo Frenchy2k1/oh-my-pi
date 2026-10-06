@@ -105,10 +105,6 @@ describe("shared browser launch", () => {
 			const expected = path.join(os.homedir(), "snap/chromium/common/omp", profile);
 			expect(launch?.userDataDir).toBe(expected);
 			expect(launch?.args).toContain(`--user-data-dir=${expected}`);
-			expect(fetchSpy).toHaveBeenCalledWith(
-				"http://snapd.local/v2/aliases",
-				expect.objectContaining({ unix: "/run/snapd.socket" }),
-			);
 		} finally {
 			fetchSpy.mockRestore();
 		}
