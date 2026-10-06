@@ -11,6 +11,7 @@
 - `ComposerNativeState.rate` shows a tok/s readout in the native composer bar after the effort chip, and `ComposerNativeState.thinkingInModel` draws the thinking level as the model chip's icon instead of a separate chip
 - `ImageOptions.requestRender` repaints an image without an image budget once its SIXEL encode lands ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
 - `AssistantMessageComponent` can keep finished thinking sections expanded via `setExpandThinkingBlocks()`; sections folded by hand stay folded ([#14519](https://github.com/can1357/oh-my-pi/pull/14519) by [@H4vC](https://github.com/H4vC))
+- `TerminalFramePlan.pinBottom` keeps a short viewport on the screen's bottom row by padding only below history still on screen
 
 ### Changed
 
@@ -20,6 +21,7 @@
 ### Fixed
 
 - Fixed hold-Space push-to-talk stopping the instant recording began (showing "No speech detected.") when opening the microphone briefly froze the UI ([#14463](https://github.com/can1357/oh-my-pi/pull/14463) by [@pgkt04](https://github.com/pgkt04))
+- Fixed an `ask` panel that retired transcript rows painting a screenful of blank rows above itself instead of leaving those rows visible ([#14570](https://github.com/can1357/oh-my-pi/issues/14570))
 
 ## [18.6.1] - 2026-10-04
 
