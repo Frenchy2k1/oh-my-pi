@@ -40,9 +40,7 @@
 - Fixed Tern tooltips naming keys with Nerd Font icons Tern's UI font lacks (a box after "Thinking effort"); they show keycaps (`⇧⇥`) whatever the symbol preset
 - Fixed `/new`, session switches, and Esc aborts hanging for up to 30 seconds while an extension's `message_end` hook was still running; they now wait only for end-of-turn maintenance.
 - Fixed Tern's per-turn usage row showing a 24-hour time while the user message above it showed a 12-hour time; both now follow the terminal's clock ([#14565](https://github.com/can1357/oh-my-pi/pull/14565) by [@wolfiesch](https://github.com/wolfiesch))
-- Fixed `/review` failing when a branch adds, updates, or removes a submodule pointer ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
-- Fixed `/review` failing on submodule pointer changes or omitting unstaged submodule commit advances ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
-- Fixed `/review` failing on submodule pointer changes, omitting unstaged submodule commit advances, or hiding uncommitted edits in submodule checkouts ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
+- Fixed `/review` failing on submodule pointer changes, omitting unstaged pointer advances, or hiding edits in submodule checkouts ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
 - Agentic split commits can now stage conversions between submodules and regular files ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
 - Fixed Tern's agents pill missing while a finished subagent runs again after an IRC message woke or revived it; it now counts running agents as the status-line badge does
 - Fixed browser `tab.goto`, `back`, `forward` and `reload` timing out on pages whose ad, chat or other iframe never finishes loading, although the page itself had loaded ([#14421](https://github.com/can1357/oh-my-pi/pull/14421) by [@will-bogusz](https://github.com/will-bogusz))
