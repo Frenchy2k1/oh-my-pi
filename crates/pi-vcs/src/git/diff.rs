@@ -23,6 +23,7 @@ struct FileChange {
 	new_mode:     Option<gix::objs::tree::EntryMode>,
 	similarity:   Option<u8>,
 	worktree_new: bool,
+	new_dirty:    bool,
 }
 
 struct Rendered {
@@ -120,6 +121,7 @@ impl GitRepo {
 			new_mode: right_file.as_ref().map(|file| file.mode),
 			similarity: None,
 			worktree_new: false,
+			new_dirty: false,
 		};
 		let mut cache = repo
 			.diff_resource_cache_for_tree_diff()
@@ -252,6 +254,7 @@ fn tree_changes(
 				new_mode:     Some(entry_mode),
 				similarity:   None,
 				worktree_new: false,
+				new_dirty:    false,
 			},
 			ChangeDetached::Deletion { location, entry_mode, id, .. } => FileChange {
 				old_path:     path_string(location.as_ref()),
@@ -262,6 +265,7 @@ fn tree_changes(
 				new_mode:     None,
 				similarity:   None,
 				worktree_new: false,
+				new_dirty:    false,
 			},
 			ChangeDetached::Modification {
 				location,
@@ -278,6 +282,7 @@ fn tree_changes(
 				new_mode:     Some(entry_mode),
 				similarity:   None,
 				worktree_new: false,
+				new_dirty:    false,
 			},
 			ChangeDetached::Rewrite {
 				source_location,
@@ -304,6 +309,7 @@ fn tree_changes(
 						diff.map_or(100, |stats| (stats.similarity * 100.0).floor() as u8),
 					),
 					worktree_new: false,
+					new_dirty:    false,
 				}
 			},
 		};
@@ -373,13 +379,16 @@ fn base_worktree_changes(
 			previous.new_mode = change.new_mode;
 			previous.new_path = change.new_path;
 			previous.worktree_new = change.worktree_new;
+			previous.new_dirty = change.new_dirty;
 		} else {
 			combined.insert(change.new_path.clone(), change);
 		}
 	}
 	let mut out = combined
 		.into_values()
-		.filter(|change| change.old_id != change.new_id || change.old_mode != change.new_mode)
+		.filter(|change| {
+			change.old_id != change.new_id || change.old_mode != change.new_mode || change.new_dirty
+		})
 		.collect::<Vec<_>>();
 	sort_changes(&mut out);
 	Ok(out)
@@ -398,6 +407,7 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 			new_mode:     index_mode(entry_mode)?,
 			similarity:   None,
 			worktree_new: false,
+			new_dirty:    false,
 		},
 		ChangeRef::Deletion { location, entry_mode, id, .. } => FileChange {
 			old_path:     path_string(location.as_ref()),
@@ -408,6 +418,7 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 			new_mode:     None,
 			similarity:   None,
 			worktree_new: false,
+			new_dirty:    false,
 		},
 		ChangeRef::Modification {
 			location,
@@ -425,6 +436,7 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 			new_mode:     index_mode(entry_mode)?,
 			similarity:   None,
 			worktree_new: false,
+			new_dirty:    false,
 		},
 		ChangeRef::Rewrite {
 			source_location,
@@ -449,6 +461,7 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 				new_mode:     index_mode(entry_mode)?,
 				similarity:   Some(if identical { 100 } else { u8::MAX }),
 				worktree_new: false,
+				new_dirty:    false,
 			}
 		},
 	};
@@ -483,6 +496,7 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 		let mut new_id = null;
 		let mut new_mode = None;
 		let mut worktree_new = true;
+		let mut new_dirty = false;
 		match status {
 			EntryStatus::Change(Change::Removed) => {},
 			EntryStatus::Change(Change::Type { .. } | Change::Modification { .. }) => {
@@ -511,11 +525,15 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 				};
 				new_id = head;
 				new_mode = old_mode;
+				new_dirty = submodule
+					.changes
+					.as_ref()
+					.is_some_and(|changes| !changes.is_empty());
 				worktree_new = false;
 			},
 			EntryStatus::Conflict { .. } | EntryStatus::NeedsUpdate(_) => continue,
 		}
-		if new_mode.is_some() && old_id == new_id && old_mode == new_mode {
+		if new_mode.is_some() && old_id == new_id && old_mode == new_mode && !new_dirty {
 			continue;
 		}
 		let path = path_string(path.as_ref());
@@ -528,6 +546,7 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 			new_mode,
 			similarity: None,
 			worktree_new,
+			new_dirty,
 		});
 	}
 	sort_changes(&mut out);
@@ -686,6 +705,7 @@ fn render_change(
 		part.new_mode = None;
 		part.similarity = None;
 		part.worktree_new = false;
+		part.new_dirty = false;
 		let mut deleted = render_change(repo, cache, &part, context, binary_patch, budget)?;
 		cache.clear_resource_cache_keep_allocation();
 
@@ -832,7 +852,8 @@ fn render_gitlink(change: &FileChange) -> Result<Rendered> {
 		let _ = writeln!(text, "-{SUBPROJECT_COMMIT}{}", change.old_id);
 	}
 	if new {
-		let _ = writeln!(text, "+{SUBPROJECT_COMMIT}{}", change.new_id);
+		let dirty = if change.new_dirty { "-dirty" } else { "" };
+		let _ = writeln!(text, "+{SUBPROJECT_COMMIT}{}{dirty}", change.new_id);
 	}
 	Ok(Rendered { text, added: Some(u32::from(new)), removed: Some(u32::from(old)) })
 }
@@ -1922,7 +1943,33 @@ mod tests {
 			repo.diff_text(&base).expect("base-to-worktree pointer"),
 			git(dir.path(), &["diff", "--no-ext-diff", "HEAD"])
 		);
+		fs::write(checkout.join("file.txt"), "dirty\n").expect("dirty advanced submodule");
+		let dirty = git(dir.path(), &["diff", "--no-ext-diff"]);
+		assert!(dirty.contains("-dirty"), "Git reports dirty submodule checkout");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("dirty pointer"),
+			dirty
+		);
+		assert_eq!(
+			repo
+				.diff_text(&base)
+				.expect("dirty base-to-worktree pointer"),
+			git(dir.path(), &["diff", "--no-ext-diff", "HEAD"])
+		);
+		git(&checkout, &["checkout", "--", "file.txt"]);
 		git(dir.path(), &["add", "sub"]);
+		fs::write(checkout.join("file.txt"), "dirty again\n").expect("dirty unchanged pointer");
+		let dirty = git(dir.path(), &["diff", "--no-ext-diff"]);
+		assert!(dirty.contains("-dirty"), "Git reports dirty unchanged submodule pointer");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("dirty-only pointer"),
+			dirty
+		);
+		git(&checkout, &["checkout", "--", "file.txt"]);
 		fs::write(checkout.join("file.txt"), "three\n").expect("advance submodule again");
 		git(&checkout, &["commit", "-qam", "third"]);
 		assert_eq!(

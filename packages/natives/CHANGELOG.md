@@ -49,7 +49,7 @@
 
 ### Fixed
 
-- Git diffs now render staged and unstaged submodule pointer changes as `Subproject commit` patches ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
+- Git diffs now render staged and unstaged submodule pointer changes as `Subproject commit` patches, including `-dirty` for uncommitted edits in a submodule checkout ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
 - Agentic split commits can now stage conversions between submodules and regular files ([#14568](https://github.com/can1357/oh-my-pi/issues/14568)).
 - Rejected stale display-layout coordinates before pointer input and zoom, and preserved the previous coordinate frame when a capture is canceled.
 - Released held input on cancellation and refused competing native mutations before dispatch.
