@@ -176,7 +176,10 @@ impl GitRepo {
 		} else {
 			None
 		};
-		let changes = tree_changes(&repo, parent_tree.as_ref(), Some(&tree), &[])?;
+		let changes = split_gitlink_type_changes(
+			&repo,
+			tree_changes(&repo, parent_tree.as_ref(), Some(&tree), &[])?,
+		);
 		for rendered in render_changes(&repo, &changes, 3, false, None)? {
 			text.push_str(&rendered.text);
 		}
@@ -191,18 +194,61 @@ impl GitRepo {
 }
 
 fn collect_changes(repo: &gix::Repository, options: &DiffOptions) -> Result<Vec<FileChange>> {
-	if let Some(base) = options.base.as_deref() {
+	let changes = if let Some(base) = options.base.as_deref() {
 		let old = revision_tree(repo, base)?;
 		if let Some(head) = options.head.as_deref() {
 			let new = revision_tree(repo, head)?;
-			return tree_changes(repo, Some(&old), Some(&new), &options.files);
+			tree_changes(repo, Some(&old), Some(&new), &options.files)?
+		} else {
+			base_worktree_changes(repo, old.id, &options.files)?
 		}
-		return base_worktree_changes(repo, old.id, &options.files);
+	} else if options.cached {
+		cached_changes(repo, &options.files)?
+	} else {
+		worktree_changes(repo, &options.files)?
+	};
+	Ok(split_gitlink_type_changes(repo, changes))
+}
+
+fn is_gitlink_type_change(change: &FileChange) -> bool {
+	change.old_mode.is_some()
+		&& change.new_mode.is_some()
+		&& change
+			.old_mode
+			.is_some_and(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+			!= change
+				.new_mode
+				.is_some_and(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+}
+// Git renders a gitlink-to-file type change as two distinct patches, not as a
+// content diff between a commit ID and a blob. Split before rendering so the
+// patch, changed paths and numstat all describe the same two changes.
+
+fn split_gitlink_type_changes(repo: &gix::Repository, changes: Vec<FileChange>) -> Vec<FileChange> {
+	let split_count = changes
+		.iter()
+		.filter(|change| is_gitlink_type_change(change))
+		.count();
+	if split_count == 0 {
+		return changes;
 	}
-	if options.cached {
-		return cached_changes(repo, &options.files);
+	let null = repo.object_hash().null();
+	let mut out = Vec::with_capacity(changes.len() + split_count);
+	for mut change in changes {
+		if is_gitlink_type_change(&change) {
+			let mut deletion = change.clone();
+			deletion.new_id = null;
+			deletion.new_mode = None;
+			deletion.similarity = None;
+			deletion.worktree_new = false;
+			change.old_id = null;
+			change.old_mode = None;
+			change.similarity = None;
+			out.push(deletion);
+		}
+		out.push(change);
 	}
-	worktree_changes(repo, &options.files)
+	out
 }
 
 fn revision_tree<'repo>(repo: &'repo gix::Repository, rev: &str) -> Result<gix::Tree<'repo>> {
@@ -615,13 +661,13 @@ fn render_changes(
 	Ok(out)
 }
 
-/// Bytes `render_change` holds in memory for `change`: both blob sizes read
-/// from object headers, or the working-tree file's size for a side that lives
-/// there. Best effort — a side that cannot be sized counts as zero and is left
-/// to the post-render check.
+/// Bytes `render_change` holds in memory for `change`: blob sizes from object
+/// headers or working-tree metadata, but not gitlink commit objects (only their
+/// IDs are rendered). Best effort; unsized sides count as zero.
 fn change_input_bytes(repo: &gix::Repository, change: &FileChange) -> usize {
-	let blob_bytes = |id: gix::ObjectId| -> usize {
-		if id.is_null() {
+	let blob_bytes = |id: gix::ObjectId, mode: Option<gix::objs::tree::EntryMode>| -> usize {
+		if id.is_null() || mode.is_some_and(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+		{
 			return 0;
 		}
 		repo
@@ -636,9 +682,9 @@ fn change_input_bytes(repo: &gix::Repository, change: &FileChange) -> usize {
 			.and_then(|dir| std::fs::symlink_metadata(dir.join(&change.new_path)).ok())
 			.map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(usize::MAX))
 	} else {
-		blob_bytes(change.new_id)
+		blob_bytes(change.new_id, change.new_mode)
 	};
-	blob_bytes(change.old_id).saturating_add(new_bytes)
+	blob_bytes(change.old_id, change.old_mode).saturating_add(new_bytes)
 }
 
 fn render_change(
@@ -659,6 +705,11 @@ fn render_change(
 		.or(change.old_mode)
 		.ok_or_else(|| Error::backend("git diff", "change has no file mode"))?
 		.kind();
+	if old_kind == gix::objs::tree::EntryKind::Commit
+		|| new_kind == gix::objs::tree::EntryKind::Commit
+	{
+		return render_gitlink(change);
+	}
 	cache
 		.set_resource(
 			change.old_id,
@@ -681,12 +732,7 @@ fn render_change(
 		.prepare_diff()
 		.map_err(|err| Error::backend("git diff", err))?;
 
-	let mut text = String::new();
-	text.push_str("diff --git a/");
-	text.push_str(&change.old_path);
-	text.push_str(" b/");
-	text.push_str(&change.new_path);
-	text.push('\n');
+	let mut text = render_header(change);
 	let is_binary = matches!(
 		prepared.operation,
 		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary
@@ -752,6 +798,35 @@ fn render_change(
 			Err(Error::backend("git diff", "external diff drivers cannot be rendered in-process"))
 		},
 	}
+}
+
+fn render_header(change: &FileChange) -> String {
+	format!("diff --git a/{} b/{}\n", change.old_path, change.new_path)
+}
+
+fn render_gitlink(change: &FileChange) -> Result<Rendered> {
+	let mut text = render_header(change);
+	append_metadata(&mut text, change, change.similarity, false);
+	text.push_str("--- ");
+	push_old_path(&mut text, change);
+	text.push_str("\n+++ ");
+	push_new_path(&mut text, change);
+	text.push('\n');
+	let old = !change.old_id.is_null();
+	let new = !change.new_id.is_null();
+	if !old && !new {
+		return Err(Error::backend("git diff", "gitlink has no commit ID"));
+	}
+	let old_range = if old { "1" } else { "0,0" };
+	let new_range = if new { "1" } else { "0,0" };
+	let _ = writeln!(text, "@@ -{old_range} +{new_range} @@");
+	if old {
+		let _ = writeln!(text, "-Subproject commit {}", change.old_id);
+	}
+	if new {
+		let _ = writeln!(text, "+Subproject commit {}", change.new_id);
+	}
+	Ok(Rendered { text, added: Some(u32::from(new)), removed: Some(u32::from(old)) })
 }
 
 fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>, full_ids: bool) {
@@ -1697,6 +1772,58 @@ mod tests {
 		assert_eq!(
 			repo.diff_text(&base_only).expect("base diff"),
 			git(dir.path(), &["diff", "--no-ext-diff", "HEAD^"])
+		);
+	}
+
+	#[test]
+	fn gitlink_patches_match_git_for_add_update_and_delete() {
+		let dir = fixture();
+		let first = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{first},sub")]);
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let cached = DiffOptions { cached: true, ..DiffOptions::default() };
+		assert_eq!(
+			repo.diff_text(&cached).expect("added gitlink"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached"])
+		);
+		assert_eq!(repo.numstat(&cached).expect("gitlink numstat"), vec![NumstatEntry {
+			path:    "sub".into(),
+			added:   Some(1),
+			removed: Some(0),
+		}]);
+		git(dir.path(), &["commit", "-qm", "add gitlink"]);
+		assert_eq!(
+			repo
+				.diff_tree("HEAD^", "HEAD", false)
+				.expect("revision gitlink"),
+			git(dir.path(), &["diff-tree", "-r", "-p", "HEAD^", "HEAD"])
+		);
+		assert_eq!(
+			repo.show_commit("HEAD", None).expect("show gitlink").bytes,
+			git(dir.path(), &["show", "HEAD"]).into_bytes()
+		);
+
+		let second = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{second},sub")]);
+		assert_eq!(
+			repo.diff_text(&cached).expect("updated gitlink"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached"])
+		);
+		git(dir.path(), &["update-index", "--force-remove", "sub"]);
+		assert_eq!(
+			repo.diff_text(&cached).expect("deleted gitlink"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached"])
+		);
+		fs::write(dir.path().join("blob.txt"), "text\n").expect("write blob");
+		let blob = git(dir.path(), &["hash-object", "-w", "blob.txt"])
+			.trim()
+			.to_owned();
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("100644,{blob},sub")]);
+		assert_eq!(
+			repo.diff_text(&cached).expect("gitlink to blob"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached"])
 		);
 	}
 
