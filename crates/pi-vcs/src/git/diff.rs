@@ -866,7 +866,17 @@ fn render_gitlink(change: &FileChange) -> Result<Rendered> {
 		let dirty = if change.new_dirty { "-dirty" } else { "" };
 		let _ = writeln!(text, "+{SUBPROJECT_COMMIT}{}{dirty}", change.new_id);
 	}
-	Ok(Rendered { text, added: Some(u32::from(new)), removed: Some(u32::from(old)) })
+	// Git shows a dirty-only checkout in the patch, but does not count it as
+	// changed pointer lines in --numstat.
+	let dirty_only = change.new_dirty
+		&& change.old_id == change.new_id
+		&& change.old_mode == change.new_mode
+		&& change.old_path == change.new_path;
+	Ok(Rendered {
+		text,
+		added: Some(u32::from(new && !dirty_only)),
+		removed: Some(u32::from(old && !dirty_only)),
+	})
 }
 
 fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>, full_ids: bool) {
@@ -2026,6 +2036,13 @@ mod tests {
 				.diff_text(&DiffOptions::default())
 				.expect("dirty-only pointer"),
 			dirty
+		);
+		assert_eq!(git(dir.path(), &["diff", "--no-ext-diff", "--numstat"]), "0\t0\tsub\n");
+		assert_eq!(
+			repo
+				.numstat(&DiffOptions::default())
+				.expect("dirty-only numstat"),
+			vec![NumstatEntry { path: "sub".into(), added: Some(0), removed: Some(0) }]
 		);
 		git(&checkout, &["checkout", "--", "file.txt"]);
 		fs::write(checkout.join("file.txt"), "three\n").expect("advance submodule again");
