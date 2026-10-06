@@ -123,6 +123,7 @@ impl GitRepo {
 		let mut filter = apply_filter(&repo, &patches, options.reverse)?;
 		let mut state = patch_worktree_map(self, &repo, &mut filter, &patches, options.reverse)?;
 		apply_patches_to_map(&repo, &mut state, &patches, options)?;
+		ensure_gitlink_replacements_clear(self, &patches, options.reverse)?;
 		write_patch_worktree(self, &repo, &mut filter, &patches, options.reverse, &state)
 	}
 
@@ -141,7 +142,14 @@ impl GitRepo {
 			let mut filter = apply_filter(&repo, &patches, options.reverse)?;
 			patch_worktree_map(self, &repo, &mut filter, &patches, options.reverse)?
 		};
-		match apply_patches_to_map(&repo, &mut state, &patches, options) {
+		let applied = apply_patches_to_map(&repo, &mut state, &patches, options).and_then(|()| {
+			if options.cached {
+				Ok(())
+			} else {
+				ensure_gitlink_replacements_clear(self, &patches, options.reverse)
+			}
+		});
+		match applied {
 			Ok(()) => Ok(true),
 			Err(Error::PatchFailed { .. } | Error::Conflict { .. }) => Ok(false),
 			Err(err) => Err(err),
@@ -1685,6 +1693,45 @@ fn entry_kind(mode: Mode) -> EntryKind {
 	}
 }
 
+/// A gitlink deletion may leave a populated checkout behind, as `git apply`
+/// does. Refuse a later file creation at that path before writing any changes
+/// rather than erasing submodule content to make the conversion fit.
+fn ensure_gitlink_replacements_clear(
+	repo: &GitRepo,
+	patches: &[FilePatch],
+	reverse: bool,
+) -> Result<()> {
+	let mut deleted_gitlinks = BTreeSet::new();
+	for patch in patches {
+		let (source, target, source_mode, target_mode) = patch_sides(patch, reverse);
+		if let Some(source) = source
+			&& target != Some(source)
+			&& source_mode == Some(Mode::COMMIT)
+		{
+			deleted_gitlinks.insert(source);
+		}
+		if let Some(target) = target
+			&& source.is_none()
+			&& target_mode != Some(Mode::COMMIT)
+			&& deleted_gitlinks.contains(target)
+		{
+			validate_repo_path(target).map_err(ApplyFailure::into_error)?;
+			match fs::read_dir(repo.root().join(target)) {
+				Ok(mut entries) => {
+					if entries.next().is_some() {
+						return Err(Error::PatchFailed {
+							message: format!("cannot replace populated submodule directory {target}"),
+						});
+					}
+				},
+				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
+				Err(err) => return Err(err.into()),
+			}
+		}
+	}
+	Ok(())
+}
+
 fn write_patch_worktree(
 	repo: &GitRepo,
 	gix_repo: &gix::Repository,
@@ -2158,6 +2205,69 @@ mod tests {
 			git(temp.path(), &["ls-files", "-s", "sub"]),
 			format!("160000 {pointer} 0\tsub\n")
 		);
+	}
+
+	#[test]
+	fn worktree_gitlink_replacement_keeps_populated_checkout() {
+		let temp = init(&[("base.txt", b"base\n")]);
+		let source = init(&[("file.txt", b"child\n")]);
+		git(temp.path(), &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"-q",
+			"add",
+			source.path().to_str().expect("UTF-8 path"),
+			"sub",
+		]);
+		git(temp.path(), &["commit", "-qm", "add submodule"]);
+		let checkout = temp.path().join("sub");
+		fs::remove_dir_all(&checkout).expect("build conversion patch");
+		fs::write(&checkout, b"replacement\n").expect("write replacement file");
+		git(temp.path(), &["add", "sub"]);
+		let patch = git(temp.path(), &["diff", "--cached", "--no-ext-diff"]);
+		git(temp.path(), &["reset", "-q", "HEAD", "--", "sub"]);
+		fs::remove_file(&checkout).expect("clear replacement file");
+		git(temp.path(), &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"update",
+			"-q",
+			"--init",
+			"sub",
+		]);
+		let repo = repo(temp.path());
+		let options =
+			ApplyOptions { cached: false, index_path: None, reverse: false, three_way: false };
+		assert!(
+			!repo
+				.can_apply_patch(&patch, &options)
+				.expect("check populated checkout")
+		);
+		let err = repo.apply_patch(&patch, &options).unwrap_err();
+		assert!(
+			matches!(err, Error::PatchFailed { ref message } if message.contains("populated submodule")),
+			"{err:?}"
+		);
+		assert_eq!(fs::read(checkout.join("file.txt")).expect("checkout preserved"), b"child\n");
+		assert!(checkout.is_dir());
+		assert_eq!(fs::read(temp.path().join("base.txt")).expect("unrelated file"), b"base\n");
+		let deletion = parse_patch(&patch)
+			.expect("split conversion patch")
+			.remove(0)
+			.raw;
+		repo
+			.apply_patch(&deletion, &options)
+			.expect("standalone gitlink deletion");
+		assert_eq!(fs::read(checkout.join("file.txt")).expect("checkout retained"), b"child\n");
+
+		fs::remove_dir_all(&checkout).expect("empty checkout in temporary fixture");
+		fs::create_dir(&checkout).expect("create empty gitlink directory");
+		repo
+			.apply_patch(&patch, &options)
+			.expect("replace empty gitlink directory");
+		assert_eq!(fs::read(&checkout).expect("replacement file"), b"replacement\n");
 	}
 
 	/// Gitlink patches carry `Subproject commit` text; applying them must move
