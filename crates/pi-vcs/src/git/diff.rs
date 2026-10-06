@@ -808,6 +808,10 @@ fn render_header(change: &FileChange) -> String {
 	format!("diff --git a/{} b/{}\n", change.old_path, change.new_path)
 }
 
+/// Line Git uses as a gitlink's patch content, followed by the commit ID; read
+/// back by patch application in [`super::patch`].
+pub(super) const SUBPROJECT_COMMIT: &str = "Subproject commit ";
+
 fn render_gitlink(change: &FileChange) -> Result<Rendered> {
 	let mut text = render_header(change);
 	append_metadata(&mut text, change, change.similarity, false);
@@ -825,10 +829,10 @@ fn render_gitlink(change: &FileChange) -> Result<Rendered> {
 	let new_range = if new { "1" } else { "0,0" };
 	let _ = writeln!(text, "@@ -{old_range} +{new_range} @@");
 	if old {
-		let _ = writeln!(text, "-Subproject commit {}", change.old_id);
+		let _ = writeln!(text, "-{SUBPROJECT_COMMIT}{}", change.old_id);
 	}
 	if new {
-		let _ = writeln!(text, "+Subproject commit {}", change.new_id);
+		let _ = writeln!(text, "+{SUBPROJECT_COMMIT}{}", change.new_id);
 	}
 	Ok(Rendered { text, added: Some(u32::from(new)), removed: Some(u32::from(old)) })
 }

@@ -24,6 +24,7 @@ use gix::{
 
 use super::{
 	GitRepo,
+	diff::SUBPROJECT_COMMIT,
 	filter::WorktreeFilter,
 	mutate::update_reference,
 	open::{load_index_or_head, status_with_index},
@@ -818,14 +819,21 @@ fn apply_patches_to_map(
 				message: format!("mode does not match for {}", source_path.unwrap_or_default()),
 			});
 		}
+		// Gitlinks patch their pointer text, as git apply does; the commit
+		// object need not exist here and is never read as blob content.
+		let gitlink = target_mode == Some(Mode::COMMIT)
+			|| source
+				.as_ref()
+				.is_some_and(|entry| entry.mode == Mode::COMMIT);
 		let source_bytes = match source.as_ref() {
+			Some(entry) if entry.mode == Mode::COMMIT => gitlink_text(entry.id),
 			Some(entry) => blob_bytes(repo, entry.id)?,
 			None => Vec::new(),
 		};
 		let direct = apply_file_bytes(patch, &source_bytes, options.reverse);
 		let bytes = match direct {
 			Ok(bytes) => bytes,
-			Err(ApplyFailure::Context(_)) if options.three_way => {
+			Err(ApplyFailure::Context(_)) if options.three_way && !gitlink => {
 				merge_patch_bytes(repo, patch, source.as_ref(), options.reverse)?
 			},
 			Err(err) => return Err(err.into_error()),
@@ -837,14 +845,18 @@ fn apply_patches_to_map(
 		}
 		if let Some(path) = target_path {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-			let id = repo
-				.write_blob(&bytes)
-				.map_err(|err| Error::backend("git apply write blob", err))?
-				.detach();
 			let mode = target_mode
 				.or_else(|| source.as_ref().map(|entry| entry.mode))
 				.or(source_mode)
 				.unwrap_or(Mode::FILE);
+			let id = if mode == Mode::COMMIT {
+				parse_gitlink_text(repo, path, &bytes)?
+			} else {
+				repo
+					.write_blob(&bytes)
+					.map_err(|err| Error::backend("git apply write blob", err))?
+					.detach()
+			};
 			state.insert(path.to_owned(), FileEntry::new(id, mode));
 		}
 	}
@@ -860,6 +872,23 @@ fn patch_sides(
 	} else {
 		(patch.old_path.as_deref(), patch.new_path.as_deref(), patch.old_mode, patch.new_mode)
 	}
+}
+
+fn gitlink_text(id: gix::ObjectId) -> Vec<u8> {
+	format!("{SUBPROJECT_COMMIT}{id}\n").into_bytes()
+}
+
+/// The commit a patched gitlink points at.
+///
+/// # Errors
+/// [`Error::PatchFailed`] when the patched text is not a `Subproject commit`
+/// line with a full object ID (git's "corrupt patch for submodule").
+fn parse_gitlink_text(repo: &gix::Repository, path: &str, bytes: &[u8]) -> Result<gix::ObjectId> {
+	bytes
+		.strip_prefix(SUBPROJECT_COMMIT.as_bytes())
+		.and_then(|rest| rest.get(..repo.object_hash().len_in_hex()))
+		.and_then(|hex| gix::ObjectId::from_hex(hex).ok())
+		.ok_or_else(|| Error::PatchFailed { message: format!("corrupt patch for submodule {path}") })
 }
 
 fn apply_file_bytes(
@@ -1375,8 +1404,14 @@ fn patch_worktree_map(
 		if state.contains_key(path) {
 			continue;
 		}
-		let mode = index
-			.get(path)
+		let indexed = index.get(path);
+		// git apply takes a gitlink's preimage from the index and never reads
+		// the submodule checkout.
+		if let Some(entry) = indexed.filter(|entry| entry.mode == Mode::COMMIT) {
+			state.insert(path.to_owned(), entry.clone());
+			continue;
+		}
+		let mode = indexed
 			.map(|entry| entry.mode)
 			.or(source_mode)
 			.or(target_mode)
@@ -1630,11 +1665,15 @@ fn write_patch_worktree(
 	state: &BTreeMap<String, FileEntry>,
 ) -> Result<()> {
 	for patch in patches {
-		let (source, target, ..) = patch_sides(patch, reverse);
+		let (source, target, source_mode, _) = patch_sides(patch, reverse);
 		if let Some(source) = source
 			&& target != Some(source)
 		{
-			remove_worktree_path(repo, source)?;
+			if source_mode == Some(Mode::COMMIT) {
+				remove_gitlink_dir(repo, source)?;
+			} else {
+				remove_worktree_path(repo, source)?;
+			}
 		}
 		if let Some(target) = target {
 			let entry = state.get(target).ok_or_else(|| Error::PatchFailed {
@@ -1815,6 +1854,12 @@ fn write_worktree_entry(
 ) -> Result<()> {
 	validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 	let absolute = repo.root().join(path);
+	// A gitlink checks out as its directory only; the submodule's own
+	// checkout is never touched, matching git apply and checkout.
+	if entry.mode == Mode::COMMIT {
+		fs::create_dir_all(&absolute)?;
+		return Ok(());
+	}
 	if let Some(parent) = absolute.parent() {
 		fs::create_dir_all(parent)?;
 	}
@@ -1842,6 +1887,24 @@ fn write_worktree_entry(
 		fs::set_permissions(&absolute, permissions)?;
 	}
 	Ok(())
+}
+
+/// Remove a deleted gitlink's directory when it is empty; a populated
+/// submodule checkout is kept, as git apply keeps it (with a warning).
+fn remove_gitlink_dir(repo: &GitRepo, path: &str) -> Result<()> {
+	validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+	match fs::remove_dir(repo.root().join(path)) {
+		Ok(()) => Ok(()),
+		Err(err)
+			if matches!(
+				err.kind(),
+				std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+			) =>
+		{
+			Ok(())
+		},
+		Err(err) => Err(err.into()),
+	}
 }
 
 fn remove_worktree_path(repo: &GitRepo, path: &str) -> Result<()> {
@@ -1970,6 +2033,72 @@ mod tests {
 		assert!(status.contains("A  picked.txt"), "picked.txt staged: {status}");
 		assert!(status.contains("M  base.txt"), "base.txt staged: {status}");
 		assert!(status.contains(" A promised.txt"), "promised.txt keeps intent-to-add: {status}");
+	}
+
+	/// Gitlink patches carry `Subproject commit` text; applying them must move
+	/// the index pointer, as `git apply` does, never read or write that text
+	/// as a blob.
+	#[test]
+	fn gitlink_patches_stage_and_apply_as_pointers() {
+		let temp = init(&[("base.txt", b"base\n")]);
+		let source = init(&[("file.txt", b"one\n")]);
+		git(temp.path(), &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"-q",
+			"add",
+			source.path().to_str().expect("UTF-8 path"),
+			"sub",
+		]);
+		git(temp.path(), &["commit", "-qm", "add submodule"]);
+		let checkout = temp.path().join("sub");
+		fs::write(checkout.join("file.txt"), b"two\n").expect("advance submodule");
+		git(&checkout, &["-c", "user.name=T", "-c", "user.email=t@e", "commit", "-qam", "two"]);
+		let head = git(&checkout, &["rev-parse", "HEAD"]).trim().to_owned();
+		let repo = repo(temp.path());
+		let pointer = |path: &str| {
+			git(temp.path(), &["rev-parse", &format!(":{path}")])
+				.trim()
+				.to_owned()
+		};
+
+		repo
+			.stage_hunks(
+				&[HunkSelection { path: "sub".into(), hunks: HunkSpec::Indices(vec![1]) }],
+				None,
+			)
+			.expect("stage unstaged pointer");
+		assert_eq!(pointer("sub"), head);
+
+		let create = format!(
+			"diff --git a/other b/other\nnew file mode 160000\nindex 0000000..{}\n--- /dev/null\n+++ \
+			 b/other\n@@ -0,0 +1 @@\n+Subproject commit {head}\n",
+			&head[..7]
+		);
+		let cached =
+			ApplyOptions { cached: true, index_path: None, reverse: false, three_way: false };
+		repo
+			.apply_patch(&create, &cached)
+			.expect("cached gitlink create");
+		assert_eq!(
+			git(temp.path(), &["ls-files", "-s", "other"]),
+			format!("160000 {head} 0\tother\n")
+		);
+
+		git(temp.path(), &["rm", "-q", "--cached", "other"]);
+		repo
+			.apply_patch(&create, &ApplyOptions { cached: false, ..cached.clone() })
+			.expect("worktree gitlink create");
+		assert!(temp.path().join("other").is_dir(), "gitlink checks out as a directory");
+		assert_eq!(git(temp.path(), &["ls-files", "other"]), "");
+
+		let corrupt = create.replace(&format!("+Subproject commit {head}"), "+not a pointer");
+		let err = repo.apply_patch(&corrupt, &cached).unwrap_err();
+		assert!(
+			matches!(err, Error::PatchFailed { ref message } if message.contains("submodule other")),
+			"{err:?}"
+		);
 	}
 
 	/// The index stat entry for `path`, as git last recorded it.
