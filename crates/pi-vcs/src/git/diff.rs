@@ -525,10 +525,20 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 				};
 				new_id = head;
 				new_mode = old_mode;
-				new_dirty = submodule
-					.changes
-					.as_ref()
-					.is_some_and(|changes| !changes.is_empty());
+				// Git reports untracked submodule files in status, but excludes
+				// them from the superproject's patch and dirty marker.
+				new_dirty = submodule.changes.as_ref().is_some_and(|changes| {
+					changes.iter().any(|item| {
+						matches!(
+							item,
+							gix::status::Item::TreeIndex(_)
+								| gix::status::Item::IndexWorktree(
+									gix::status::index_worktree::Item::Modification { .. }
+										| gix::status::index_worktree::Item::Rewrite { .. }
+								)
+						)
+					})
+				});
 				worktree_new = false;
 			},
 			EntryStatus::Conflict { .. } | EntryStatus::NeedsUpdate(_) => continue,
@@ -1943,6 +1953,14 @@ mod tests {
 			repo.diff_text(&base).expect("base-to-worktree pointer"),
 			git(dir.path(), &["diff", "--no-ext-diff", "HEAD"])
 		);
+		fs::write(checkout.join("new.txt"), "untracked\n").expect("untracked advanced submodule");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("advanced pointer with untracked file"),
+			git(dir.path(), &["diff", "--no-ext-diff"])
+		);
+		fs::remove_file(checkout.join("new.txt")).expect("remove untracked fixture");
 		fs::write(checkout.join("file.txt"), "dirty\n").expect("dirty advanced submodule");
 		let dirty = git(dir.path(), &["diff", "--no-ext-diff"]);
 		assert!(dirty.contains("-dirty"), "Git reports dirty submodule checkout");
@@ -1960,6 +1978,45 @@ mod tests {
 		);
 		git(&checkout, &["checkout", "--", "file.txt"]);
 		git(dir.path(), &["add", "sub"]);
+		fs::write(checkout.join("new.txt"), "untracked\n").expect("untracked submodule file");
+		assert_eq!(git(dir.path(), &["diff", "--no-ext-diff"]), "");
+		assert_eq!(git(dir.path(), &["diff", "--no-ext-diff", "--numstat"]), "");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("untracked-only diff"),
+			""
+		);
+		assert!(
+			repo
+				.numstat(&DiffOptions::default())
+				.expect("untracked-only numstat")
+				.is_empty()
+		);
+		assert!(
+			repo
+				.changed_files(&DiffOptions::default())
+				.expect("untracked-only paths")
+				.is_empty()
+		);
+		assert!(
+			!repo
+				.has_diff(&DiffOptions::default())
+				.expect("untracked-only has diff")
+		);
+		fs::remove_file(checkout.join("new.txt")).expect("remove untracked fixture");
+		fs::write(checkout.join("file.txt"), "staged dirty\n").expect("stage tracked child edit");
+		git(&checkout, &["add", "file.txt"]);
+		let dirty = git(dir.path(), &["diff", "--no-ext-diff"]);
+		assert!(dirty.contains("-dirty"), "Git reports staged edits in child");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("staged child edit"),
+			dirty
+		);
+		git(&checkout, &["reset", "-q", "HEAD", "--", "file.txt"]);
+		git(&checkout, &["checkout", "--", "file.txt"]);
 		fs::write(checkout.join("file.txt"), "dirty again\n").expect("dirty unchanged pointer");
 		let dirty = git(dir.path(), &["diff", "--no-ext-diff"]);
 		assert!(dirty.contains("-dirty"), "Git reports dirty unchanged submodule pointer");
