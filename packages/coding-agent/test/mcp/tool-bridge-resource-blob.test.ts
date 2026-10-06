@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import { describe, expect, it } from "bun:test";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
@@ -52,6 +53,21 @@ describe("MCP bridge embedded resource blobs (#14598)", () => {
 		expect(text).toBe(`[Resource: waplugin://media/42]\naudio/ogg payload (7B) saved to ${url}`);
 		const filePath = await InternalUrlRouter.instance().locate(url!, { localProtocolOptions });
 		expect(new Uint8Array(await Bun.file(filePath!).arrayBuffer())).toEqual(audio);
+	});
+
+	it("saves a zero-byte blob as an empty file instead of an empty image block", async () => {
+		using temp = TempDir.createSync("@mcp-resource-blob-");
+		const localProtocolOptions = { getArtifactsDir: () => temp.path(), getSessionId: () => "session-1" };
+		const result = await callWithResource({ uri: "example://image/empty", mimeType: "image/png", blob: "" }, {
+			localProtocolOptions,
+		} as CustomToolContext);
+
+		expect(result.content).toHaveLength(1);
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		const url = /local:\/\/mcp-resource-[0-9a-f]+\.png/.exec(text)?.[0];
+		expect(text).toBe(`[Resource: example://image/empty]\nimage/png payload (0B) saved to ${url}`);
+		const filePath = await InternalUrlRouter.instance().locate(url!, { localProtocolOptions });
+		expect((await fs.stat(filePath!)).size).toBe(0);
 	});
 
 	it("reports an invalid base64 blob instead of saving garbage", async () => {

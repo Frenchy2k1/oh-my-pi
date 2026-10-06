@@ -207,7 +207,8 @@ async function formatResourceBlob(
 ): Promise<{ text: string; image?: ImageContent }> {
 	const header = `[Resource: ${uri}]`;
 	const mime = mimeType?.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
-	if (SUPPORTED_IMAGE_MIME_TYPES.has(mime)) {
+	// An empty payload is a valid zero-byte attachment but never a decodable image.
+	if (blob.length > 0 && SUPPORTED_IMAGE_MIME_TYPES.has(mime)) {
 		return { text: header, image: { type: "image", data: blob, mimeType: mime } };
 	}
 	let bytes: Uint8Array;
@@ -273,7 +274,7 @@ async function formatMCPContent(
 					appendText(`[Resource: ${uri}]\n${resourceText}`);
 					break;
 				}
-				if (!blob) {
+				if (blob === undefined) {
 					appendText(`[Resource: ${uri}]`);
 					break;
 				}
