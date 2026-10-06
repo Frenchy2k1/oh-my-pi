@@ -724,6 +724,7 @@ fn render_change(
 		part.new_id = change.new_id;
 		part.new_mode = change.new_mode;
 		part.worktree_new = change.worktree_new;
+		part.new_dirty = change.new_dirty;
 		let next_budget = budget.map(|budget| RenderBudget {
 			already: budget.already.saturating_add(deleted.text.len()),
 			..budget
@@ -2033,6 +2034,37 @@ mod tests {
 			repo.diff_text(&base).expect("staged and unstaged pointer"),
 			git(dir.path(), &["diff", "--no-ext-diff", "HEAD"])
 		);
+	}
+
+	#[test]
+	fn staged_file_to_gitlink_keeps_dirty_marker() {
+		let dir = fixture();
+		fs::write(dir.path().join("sub"), "file\n").expect("write file");
+		git(dir.path(), &["add", "sub"]);
+		git(dir.path(), &["commit", "-qm", "file"]);
+		let source = tempfile::tempdir().expect("submodule source");
+		git(source.path(), &["init", "-q", "-b", "main"]);
+		fs::write(source.path().join("tracked.txt"), "one\n").expect("write child file");
+		git(source.path(), &["add", "tracked.txt"]);
+		git(source.path(), &["-c", "user.name=T", "-c", "user.email=t@e", "commit", "-qm", "child"]);
+		git(dir.path(), &["rm", "-q", "sub"]);
+		git(dir.path(), &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"-q",
+			"add",
+			source.path().to_str().expect("UTF-8 path"),
+			"sub",
+		]);
+		fs::write(dir.path().join("sub/tracked.txt"), "edited\n").expect("dirty child");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let base = DiffOptions { base: Some("HEAD".into()), ..DiffOptions::default() };
+		let expected = git(dir.path(), &["diff", "--no-ext-diff", "HEAD"]);
+		assert!(expected.contains("-dirty"), "Git marks the created gitlink dirty");
+		assert_eq!(repo.diff_text(&base).expect("file to dirty gitlink"), expected);
 	}
 
 	#[test]
