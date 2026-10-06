@@ -372,7 +372,7 @@ fn base_worktree_changes(
 			previous.new_id = change.new_id;
 			previous.new_mode = change.new_mode;
 			previous.new_path = change.new_path;
-			previous.worktree_new = true;
+			previous.worktree_new = change.worktree_new;
 		} else {
 			combined.insert(change.new_path.clone(), change);
 		}
@@ -482,6 +482,7 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 		let mut old_mode = index_mode(entry.mode)?;
 		let mut new_id = null;
 		let mut new_mode = None;
+		let mut worktree_new = true;
 		match status {
 			EntryStatus::Change(Change::Removed) => {},
 			EntryStatus::Change(Change::Type { .. } | Change::Modification { .. }) => {
@@ -504,9 +505,15 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 					new_mode = Some(kind.into());
 				}
 			},
-			EntryStatus::Conflict { .. }
-			| EntryStatus::NeedsUpdate(_)
-			| EntryStatus::Change(Change::SubmoduleModification(_)) => continue,
+			EntryStatus::Change(Change::SubmoduleModification(submodule)) => {
+				let Some(head) = submodule.checked_out_head_id else {
+					continue;
+				};
+				new_id = head;
+				new_mode = old_mode;
+				worktree_new = false;
+			},
+			EntryStatus::Conflict { .. } | EntryStatus::NeedsUpdate(_) => continue,
 		}
 		if new_mode.is_some() && old_id == new_id && old_mode == new_mode {
 			continue;
@@ -520,7 +527,7 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 			old_mode,
 			new_mode,
 			similarity: None,
-			worktree_new: true,
+			worktree_new,
 		});
 	}
 	sort_changes(&mut out);
@@ -1856,6 +1863,68 @@ mod tests {
 			added:   Some(1),
 			removed: Some(1),
 		}]);
+	}
+
+	#[test]
+	fn unstaged_submodule_pointer_diff_matches_git() {
+		let dir = fixture();
+		let source = tempfile::tempdir().expect("submodule source");
+		git(source.path(), &["init", "-q", "-b", "main"]);
+		git(source.path(), &["config", "user.name", "Diff Test"]);
+		git(source.path(), &["config", "user.email", "diff@example.com"]);
+		fs::write(source.path().join("file.txt"), "one\n").expect("write submodule file");
+		git(source.path(), &["add", "file.txt"]);
+		git(source.path(), &["commit", "-qm", "first"]);
+		git(dir.path(), &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"-q",
+			"add",
+			source.path().to_str().expect("UTF-8 path"),
+			"sub",
+		]);
+		git(dir.path(), &["commit", "-qm", "add submodule"]);
+
+		let checkout = dir.path().join("sub");
+		git(&checkout, &["config", "user.name", "Diff Test"]);
+		git(&checkout, &["config", "user.email", "diff@example.com"]);
+		fs::write(checkout.join("file.txt"), "two\n").expect("advance submodule");
+		git(&checkout, &["commit", "-qam", "second"]);
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("unstaged pointer"),
+			git(dir.path(), &["diff", "--no-ext-diff"])
+		);
+		assert_eq!(
+			repo
+				.changed_files(&DiffOptions::default())
+				.expect("unstaged paths"),
+			vec!["sub"]
+		);
+		assert_eq!(
+			repo
+				.numstat(&DiffOptions::default())
+				.expect("unstaged numstat"),
+			vec![NumstatEntry { path: "sub".into(), added: Some(1), removed: Some(1) }]
+		);
+
+		let base = DiffOptions { base: Some("HEAD".into()), ..DiffOptions::default() };
+		assert_eq!(
+			repo.diff_text(&base).expect("base-to-worktree pointer"),
+			git(dir.path(), &["diff", "--no-ext-diff", "HEAD"])
+		);
+		git(dir.path(), &["add", "sub"]);
+		fs::write(checkout.join("file.txt"), "three\n").expect("advance submodule again");
+		git(&checkout, &["commit", "-qam", "third"]);
+		assert_eq!(
+			repo.diff_text(&base).expect("staged and unstaged pointer"),
+			git(dir.path(), &["diff", "--no-ext-diff", "HEAD"])
+		);
 	}
 
 	#[test]
