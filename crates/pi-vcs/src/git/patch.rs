@@ -112,7 +112,8 @@ impl GitRepo {
 		if patch_text.trim().is_empty() {
 			return Ok(());
 		}
-		let patches = parse_patch(patch_text).map_err(ApplyFailure::into_error)?;
+		let patches =
+			parse_patch_for_apply(patch_text, options.reverse).map_err(ApplyFailure::into_error)?;
 		let repo = self.gix()?;
 		if options.cached {
 			let mut state = index_map_at(&repo, options.index_path.as_deref())?;
@@ -130,7 +131,7 @@ impl GitRepo {
 		if patch_text.trim().is_empty() {
 			return Ok(true);
 		}
-		let Ok(patches) = parse_patch(patch_text) else {
+		let Ok(patches) = parse_patch_for_apply(patch_text, options.reverse) else {
 			return Ok(false);
 		};
 		let repo = self.gix()?.with_object_memory();
@@ -572,6 +573,21 @@ fn parse_patch(text: &str) -> std::result::Result<Vec<FilePatch>, ApplyFailure> 
 		files.push(parse_file_patch(&text[start..end])?);
 	}
 	Ok(files)
+}
+
+/// Parse `text` into sections in application order. A reversed series undoes
+/// its last section first, so a gitlink/file conversion (delete then create
+/// at one path) removes the created entry before restoring the deleted one,
+/// as `git apply -R` accepts.
+fn parse_patch_for_apply(
+	text: &str,
+	reverse: bool,
+) -> std::result::Result<Vec<FilePatch>, ApplyFailure> {
+	let mut patches = parse_patch(text)?;
+	if reverse {
+		patches.reverse();
+	}
+	Ok(patches)
 }
 
 fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
@@ -2112,6 +2128,35 @@ mod tests {
 		assert_eq!(
 			git(to_link.path(), &["ls-files", "-s", "sub"]),
 			format!("160000 {child_head} 0\tsub\n")
+		);
+	}
+
+	/// A gitlink/file conversion is two sections at one path; reversing it must
+	/// undo the creation before restoring the deletion, as `git apply -R` does.
+	#[test]
+	fn reverse_apply_undoes_gitlink_type_change() {
+		let temp = init(&[("base.txt", b"base\n")]);
+		let pointer = git(temp.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		git(temp.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{pointer},sub")]);
+		git(temp.path(), &["commit", "-qm", "gitlink"]);
+		fs::write(temp.path().join("sub"), b"body\n").expect("replace gitlink");
+		git(temp.path(), &["add", "sub"]);
+		let repo = repo(temp.path());
+		let diff = repo
+			.diff_text(&DiffOptions { cached: true, ..DiffOptions::default() })
+			.expect("staged conversion diff");
+		let cached =
+			ApplyOptions { cached: true, index_path: None, reverse: true, three_way: false };
+
+		assert!(repo.can_apply_patch(&diff, &cached).expect("check reverse"));
+		repo
+			.apply_patch(&diff, &ApplyOptions { cached: false, ..cached.clone() })
+			.expect("worktree reverse");
+		assert!(temp.path().join("sub").is_dir(), "file replaced by gitlink directory");
+		repo.apply_patch(&diff, &cached).expect("cached reverse");
+		assert_eq!(
+			git(temp.path(), &["ls-files", "-s", "sub"]),
+			format!("160000 {pointer} 0\tsub\n")
 		);
 	}
 
