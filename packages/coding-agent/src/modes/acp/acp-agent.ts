@@ -1324,6 +1324,15 @@ export class AcpAgent implements Agent {
 		try {
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
+			// On resume, MCP refreshes can freeze against restored assistant history.
+			// Rebuild once after connection: this process has not sent its new base yet.
+			if (
+				mcpServers.length > 0 &&
+				session.model?.thinking?.prefixBinding === true &&
+				session.agent.state.messages.some(message => message.role === "assistant")
+			) {
+				await session.refreshBaseSystemPrompt();
+			}
 			this.#sessions.set(session.sessionId, record);
 			return record;
 		} catch (error) {
