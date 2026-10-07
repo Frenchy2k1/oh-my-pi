@@ -3323,6 +3323,8 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 		// Namespace the refreshed pseudo-API cache separately so those rows cannot
 		// override bundled `api: "openrouter"` models during online-if-uncached startup.
 		cacheProviderId: resolveModelCacheProviderId("openrouter"),
+		// `createModelManager()` prunes bundled chat rows the live roster omits.
+		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: async () => {
 			const [chatModels, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
 				await Promise.all([
@@ -3545,14 +3547,9 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 					endpoint: `${baseUrl}/embeddings/models`,
 				});
 			}
-			if (
-				chatModels === null &&
-				imageModels === null &&
-				decisionModels === null &&
-				rerankModels === null &&
-				videoModels === null &&
-				embeddingModels === null
-			) {
+			// Authority rests on the chat roster: publishing only the other kinds
+			// would prune every chat model, so fall back to cache/bundled instead.
+			if (chatModels === null) {
 				return null;
 			}
 

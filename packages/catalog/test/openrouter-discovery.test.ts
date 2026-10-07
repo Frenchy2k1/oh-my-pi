@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 const CHAT_PAYLOAD = {
 	data: [
@@ -236,10 +237,14 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 		const result = await resolveProviderModels(
 			{
 				...openrouterModelManagerOptions({
-					fetch: async input =>
-						String(input).endsWith("/models?output_modalities=decisions")
-							? Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] })
-							: new Response(null, { status: 404 }),
+					fetch: async input => {
+						const url = String(input);
+						if (url.endsWith("/models?output_modalities=decisions")) {
+							return Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] });
+						}
+						if (url === "https://openrouter.ai/api/v1/models") return Response.json(CHAT_PAYLOAD);
+						return new Response(null, { status: 404 });
+					},
 				}),
 				staticModels: [],
 				cacheDbPath: ":memory:",
@@ -252,6 +257,60 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 			kind: "judge",
 			contextWindow: null,
 			maxTokens: null,
+		});
+	});
+
+	describe("bundled rows the live roster omits (#14882)", () => {
+		const retiredChat: ModelSpec<"openrouter"> = {
+			id: "stealth/ox-alpha",
+			name: "Ox Alpha",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 131_072,
+		};
+		const seededTranscription: ModelSpec<"openai-transcriptions"> = {
+			id: "openai/whisper-1",
+			name: "OpenAI: Whisper 1",
+			api: "openai-transcriptions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			supportsTools: false,
+			contextWindow: null,
+			maxTokens: null,
+		};
+		const resolve = (chat: () => Response) =>
+			resolveProviderModels(
+				{
+					...openrouterModelManagerOptions({
+						fetch: async input =>
+							String(input) === "https://openrouter.ai/api/v1/models" ? chat() : Response.json({ data: [] }),
+					}),
+					staticModels: [retiredChat, seededTranscription],
+					cacheDbPath: ":memory:",
+				},
+				"online",
+			);
+
+		it("prunes retired chat rows after a successful refresh but keeps non-chat seeds", async () => {
+			const result = await resolve(() => Response.json(CHAT_PAYLOAD));
+			const ids = result.models.map(model => model.id);
+			expect(ids).not.toContain("stealth/ox-alpha");
+			expect(ids).toContain("openai/whisper-1");
+			expect(ids).toContain("openrouter/auto");
+		});
+
+		it("keeps the bundled chat roster when only the chat listing fails", async () => {
+			const result = await resolve(() => new Response(null, { status: 503 }));
+			expect(result.stale).toBe(true);
+			expect(result.models.map(model => model.id)).toContain("stealth/ox-alpha");
 		});
 	});
 });
