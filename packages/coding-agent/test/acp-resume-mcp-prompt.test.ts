@@ -1,4 +1,4 @@
-import { afterAll, expect, it } from "bun:test";
+import { afterAll, expect, it, vi } from "bun:test";
 import type { Api, ModelSpec } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -53,13 +53,15 @@ afterAll(() => {
 	authStorage.close();
 });
 
-it("preserves MCP routes in the first provider request after ACP session/load", async () => {
+async function runResumeTest(delayed: boolean): Promise<void> {
 	using dir = TempDir.createSync("@pi-acp-resume-mcp-");
 	const originalAgentDir = getAgentDir();
 	const originalAgentEnv = process.env.PI_CODING_AGENT_DIR;
 	setAgentDir(dir.join("agent"));
 	const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.join("agent") });
 	const requests: string[][] = [];
+	const deferredTools = Promise.withResolvers<void>();
+	let delayTools = false;
 	registerCustomApi(
 		API,
 		(_model, context) => {
@@ -84,6 +86,7 @@ it("preserves MCP routes in the first provider request after ACP session/load", 
 				return new Response(null, { status: 202 });
 			}
 			const method = "method" in message ? message.method : undefined;
+			if (method === "tools/list" && delayTools) await deferredTools.promise;
 			const result =
 				method === "initialize"
 					? {
@@ -157,13 +160,33 @@ it("preserves MCP routes in the first provider request after ACP session/load", 
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
 		await first.dispose();
+		delayTools = delayed;
 		const second = await process();
 		await second.loadSession({ sessionId, cwd: dir.path(), mcpServers: servers });
+		if (delayed) {
+			const resumed = sessions.find(session => session.sessionId === sessionId && !session.isDisposed);
+			if (!resumed) throw new Error("ACP session was not restored");
+			expect(resumed.agent.state.systemPrompt.join("\n")).not.toContain("## MCP Tool Routes");
+			const rebuilt = Promise.withResolvers<void>();
+			const originalRefresh = resumed.refreshBaseSystemPrompt.bind(resumed);
+			const refresh = vi.spyOn(resumed, "refreshBaseSystemPrompt").mockImplementation(async commitIf => {
+				await originalRefresh(commitIf);
+				rebuilt.resolve();
+			});
+			try {
+				deferredTools.resolve();
+				await rebuilt.promise;
+			} finally {
+				refresh.mockRestore();
+			}
+			expect(resumed.agent.state.systemPrompt.join("\n")).toContain("## MCP Tool Routes");
+		}
 		await second.prompt({ sessionId, prompt: [{ type: "text", text: "second" }] });
 		expect(requests).toHaveLength(2);
 		expect(requests[0].join("\n")).toContain("## MCP Tool Routes");
 		expect(requests[1]).toEqual(requests[0]);
 	} finally {
+		deferredTools.resolve();
 		for (const agent of agents.reverse()) await agent.dispose();
 		for (const session of sessions) if (!session.isDisposed) await session.dispose();
 		mcp.stop(true);
@@ -172,4 +195,6 @@ it("preserves MCP routes in the first provider request after ACP session/load", 
 		setAgentDir(originalAgentDir);
 		if (originalAgentEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	}
-});
+}
+
+it.each([false, true])("preserves MCP routes on ACP resume (late tools: %p)", runResumeTest, 15_000);
