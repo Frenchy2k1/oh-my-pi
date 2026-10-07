@@ -212,6 +212,65 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 		});
 	});
 
+	it("retains cached auxiliary kinds only when their listings fail during an authoritative chat refresh", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openrouter-partial-refresh-"));
+		const cacheDbPath = path.join(dir, "models.db");
+		let phase = 0;
+		const options = openrouterModelManagerOptions({
+			fetch: async input => {
+				const url = String(input);
+				if (url.endsWith("/images/models")) {
+					if (phase === 0) return Response.json(IMAGE_PAYLOAD);
+					return phase === 1 ? new Response(null, { status: 503 }) : Response.json({ data: [] });
+				}
+				if (url.endsWith("/models?output_modalities=decisions")) {
+					if (phase === 0) return Response.json(DECISIONS_PAYLOAD);
+					return phase === 1 ? new Response(null, { status: 503 }) : Response.json({ data: [] });
+				}
+				if (url.endsWith("/models?output_modalities=rerank")) {
+					return phase === 0 ? Response.json(RERANK_PAYLOAD) : Response.json({ data: [] });
+				}
+				if (url.endsWith("/videos/models")) {
+					return phase === 0 ? Response.json(VIDEO_PAYLOAD) : Response.json({ data: [] });
+				}
+				if (url.endsWith("/embeddings/models")) {
+					return phase === 0 ? Response.json(EMBEDDING_PAYLOAD) : Response.json({ data: [] });
+				}
+				return Response.json(
+					phase === 0
+						? CHAT_PAYLOAD
+						: { data: [{ id: "openrouter/new-chat", name: "New Chat", supported_parameters: ["tools"] }] },
+				);
+			},
+		});
+		try {
+			const config = { ...options, staticModels: [], cacheDbPath };
+			await resolveProviderModels(config, "online");
+			phase = 1;
+			const partial = await resolveProviderModels(config, "online");
+			const ids = partial.models.map(model => model.id);
+			expect(partial.source).toBe("provider");
+			expect(ids).toContain("openrouter/new-chat");
+			expect(ids).not.toContain("openrouter/auto");
+			expect(ids).toContain("bytedance-seed/seedream-5-0-pro");
+			expect(ids).toContain("~typesafe/jev-latest");
+			expect(ids).not.toContain("cohere/rerank-v3.5");
+			expect(ids).not.toContain("google/veo-3.1");
+			expect(ids).not.toContain("qwen/qwen3-embedding-8b");
+
+			const cached = await resolveProviderModels(config, "online-if-uncached");
+			expect(cached.source).toBe("cache");
+			expect(cached.models.map(model => model.id)).toContain("bytedance-seed/seedream-5-0-pro");
+
+			phase = 2;
+			const emptied = await resolveProviderModels(config, "online");
+			expect(emptied.models.map(model => model.id)).not.toContain("bytedance-seed/seedream-5-0-pro");
+			expect(emptied.models.map(model => model.id)).not.toContain("~typesafe/jev-latest");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("preserves chat discovery when the image endpoint fails", async () => {
 		const options = openrouterModelManagerOptions({
 			fetch: async input => {

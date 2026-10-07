@@ -3324,7 +3324,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 		cacheProviderId: resolveModelCacheProviderId("openrouter", { baseUrl }),
 		// `createModelManager()` prunes bundled chat rows the live roster omits.
 		dynamicModelsAuthoritative: true,
-		fetchDynamicModels: async () => {
+		fetchDynamicModels: async cachedModels => {
 			const [chatModels, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
 				await Promise.all([
 					fetchOpenAICompatibleModels({
@@ -3553,12 +3553,34 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 			}
 
 			const models = new Map<string, ModelSpec<Api>>();
-			for (const model of chatModels ?? []) models.set(model.id, model);
+			for (const model of chatModels) models.set(model.id, model);
 			for (const model of imageModels ?? []) models.set(model.id, model);
 			for (const model of decisionModels ?? []) models.set(model.id, model);
 			for (const model of rerankModels ?? []) models.set(model.id, model);
 			for (const model of videoModels ?? []) models.set(model.id, model);
 			for (const model of embeddingModels ?? []) models.set(model.id, model);
+			// A failed auxiliary listing says nothing about that runner's roster.
+			// Keep only its previous rows; a successful empty listing may remove them.
+			if (
+				imageModels === null ||
+				decisionModels === null ||
+				rerankModels === null ||
+				videoModels === null ||
+				embeddingModels === null
+			) {
+				for (const model of cachedModels ?? []) {
+					if (
+						((imageModels === null && model.api === "openrouter-images") ||
+							(decisionModels === null && model.api === "openrouter-decisions") ||
+							(rerankModels === null && model.api === "openrouter-rerank") ||
+							(videoModels === null && model.api === "openrouter-video") ||
+							(embeddingModels === null && model.api === "openai-embeddings")) &&
+						!models.has(model.id)
+					) {
+						models.set(model.id, toModelSpec(model));
+					}
+				}
+			}
 			return Array.from(models.values()).sort((left, right) => left.id.localeCompare(right.id));
 		},
 	};
