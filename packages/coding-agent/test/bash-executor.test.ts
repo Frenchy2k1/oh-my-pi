@@ -1450,6 +1450,64 @@ describe("executeBash :async: background retention", () => {
 			}
 		},
 	);
+
+	it.skipIf(process.platform === "win32")(
+		"lets the top shell of a `cd … && nohup sh -c '…' &` job finish its work after the per-job shell is released",
+		async () => {
+			const pidFile = path.join(tmp, "and-or-pid");
+			const goFile = path.join(tmp, "and-or-go");
+			const doneFile = path.join(tmp, "and-or-done");
+			const sleepBin = $which("sleep");
+			if (!sleepBin) throw new Error("sleep executable not found");
+			let pid: number | undefined;
+			try {
+				// The `cd … &&` makes the background job an and-or list, which runs
+				// in-process (nohup is not unwrapped), so the operand stays a direct
+				// kill-on-drop child. Its top shell waits on child `sleep`s, then does
+				// the follow-up write — the step lost when only the top shell dies.
+				const operand = [
+					`echo $$ > ${shellQuote(pidFile)}`,
+					`while [ ! -e ${shellQuote(goFile)} ]; do ${shellQuote(sleepBin)} 0.05; done`,
+					`touch ${shellQuote(doneFile)}`,
+				].join("; ");
+				const res = await executeBash(
+					`cd ${shellQuote(tmp)} && nohup sh -c ${shellQuote(operand)} >/dev/null 2>&1 </dev/null &`,
+					{ sessionKey: "and-or-probe:async:job1", cwd: tmp },
+				);
+				expect(res.cancelled).toBe(false);
+
+				let observedPid = Number.NaN;
+				await pollUntil(() => {
+					if (!fs.existsSync(pidFile)) return false;
+					observedPid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+					return Number.isInteger(observedPid);
+				}, Date.now() + 4000);
+				if (!Number.isInteger(observedPid)) {
+					throw new Error(`Timed out waiting for a valid PID in ${pidFile}`);
+				}
+				pid = observedPid;
+
+				// Finalize any Shell the executor let go of: an unretained one
+				// SIGKILLs the top shell via kill-on-drop. The native drop settles on
+				// its own runtime with no observable signal, so a real (short) wait
+				// is the only way to let it land before releasing the job.
+				await executeBash("true", { sessionKey: "and-or-probe:async:job2", cwd: tmp });
+				Bun.gc(true);
+				await Bun.sleep(200);
+				fs.writeFileSync(goFile, "");
+
+				await pollUntil(() => fs.existsSync(doneFile), Date.now() + 3000);
+				expect(fs.existsSync(doneFile)).toBe(true);
+			} finally {
+				if (pid !== undefined) {
+					try {
+						process.kill(-pid, "SIGKILL");
+					} catch {}
+				}
+			}
+		},
+		15_000,
+	);
 });
 
 describe("applyDirenvPreflight direnv-load clamp", () => {

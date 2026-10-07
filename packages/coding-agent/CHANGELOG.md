@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed async bash jobs that background a compound command, such as `cd dir && nohup bash -c '…' &`, killing the background shell shortly after the call returned while its children kept running orphaned ([#14853](https://github.com/can1357/oh-my-pi/issues/14853)).
+
 ## [18.8.2] - 2026-10-07
 
 ### Fixed

@@ -298,10 +298,11 @@ impl Shell {
 		Ok(())
 	}
 
-	/// Count live background jobs (`&`/`nohup` children still running) on this
-	/// session. Completed jobs are reaped first. The host uses this to retain a
-	/// per-call shell whose background processes are still running instead of
-	/// dropping it (which would SIGKILL them via kill-on-drop).
+	/// Count live background jobs (`&` jobs still running, external or
+	/// in-process) on this session. Completed jobs are reaped first. The host
+	/// uses this to retain a per-call shell whose background jobs are still
+	/// running instead of dropping it (which would SIGKILL their processes via
+	/// kill-on-drop).
 	#[napi]
 	pub async fn live_background_job_count(&self) -> u32 {
 		self.inner.live_background_job_count().await

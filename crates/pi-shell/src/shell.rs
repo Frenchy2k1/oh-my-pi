@@ -269,13 +269,15 @@ impl Shell {
 		registry.map_or_else(Vec::new, |registry| registry.live_pids())
 	}
 
-	/// Number of live background jobs (running `&`/`nohup` children) tracked by
-	/// the persistent session. Completed jobs are reaped first via a silent
-	/// `JobManager::poll()` (no job-control notifications), so the count
-	/// reflects only processes still alive. Returns 0 when no session core is
+	/// Number of live background jobs tracked by the persistent session: both
+	/// external `&`/`nohup` children and in-process jobs (`cd dir && cmd &`,
+	/// `(...) &`, background builtins). Completed jobs are reaped first via a
+	/// silent `JobManager::poll()` (no job-control notifications), so the count
+	/// reflects only jobs still running. Returns 0 when no session core is
 	/// materialized. The host uses this to decide whether to retain a per-call
-	/// shell whose background children are still running instead of dropping it
-	/// (which would SIGKILL them on kill-on-drop).
+	/// shell whose background jobs are still running instead of dropping it:
+	/// the drop aborts in-process jobs and SIGKILLs every child they or `&`
+	/// spawned (kill-on-drop), orphaning those children's own descendants.
 	pub async fn live_background_job_count(&self) -> u32 {
 		let mut guard = self.session.lock().await;
 		let Some(core) = guard.as_mut() else {
@@ -292,7 +294,7 @@ impl Shell {
 			jobs
 				.jobs
 				.iter()
-				.filter(|job| job.representative_pid().is_some())
+				.filter(|job| job.representative_pid().is_some() || job.has_internal_tasks())
 				.count(),
 		)
 		.unwrap_or(u32::MAX)
@@ -6253,14 +6255,14 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 	}
 
 	/// `live_background_job_count` reports 0 when the session has no live
-	/// external background jobs and 1 while one is running. The host relies on
-	/// this to retain a per-call shell whose `&`/`nohup` child is still alive
-	/// instead of dropping it (which would SIGKILL the child via kill-on-drop).
-	/// `sh -c` forces an external process because the bare `sleep` builtin runs
-	/// in-process and is intentionally not counted.
+	/// background jobs and counts each one while it runs — external `&`
+	/// children and in-process jobs alike — dropping finished ones. The host
+	/// relies on this to retain a per-call shell whose background job is still
+	/// alive instead of dropping it (which would SIGKILL the job's children via
+	/// kill-on-drop).
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
-	async fn live_background_job_count_tracks_external_background_jobs() {
+	async fn live_background_job_count_tracks_running_background_jobs() {
 		let _guard = shell_test_lock().lock().await;
 		let shell = Shell::new(None);
 
@@ -6288,6 +6290,36 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			.await
 			.expect("run sleep");
 		assert_eq!(shell.live_background_job_count().await, 1);
+
+		// An and-or list runs in-process (no single external process to track),
+		// yet its foreground child dies with the shell just the same (#14853).
+		shell
+			.run(
+				ShellRunOptions {
+					command: "cd / && nohup sh -c 'sleep 30' &".into(),
+					..Default::default()
+				},
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run and-or list");
+		assert_eq!(shell.live_background_job_count().await, 2);
+
+		// A finished in-process job is reaped rather than pinning the shell.
+		shell
+			.run(
+				ShellRunOptions { command: "cd / && true &".into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run short and-or list");
+		let deadline = time::Instant::now() + Duration::from_secs(5);
+		while shell.live_background_job_count().await != 2 && time::Instant::now() < deadline {
+			time::sleep(Duration::from_millis(20)).await;
+		}
+		assert_eq!(shell.live_background_job_count().await, 2);
 
 		// Dropping the shell at scope end reaps the child via kill-on-drop.
 		shell.abort().await;

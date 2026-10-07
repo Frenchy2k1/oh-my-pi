@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `Shell.liveBackgroundJobCount()` ignoring in-process background jobs (`cd dir && cmd &`, `(…) &`, background builtins), so a host dropping the shell killed their processes ([#14853](https://github.com/can1357/oh-my-pi/issues/14853)).
+
 ## [18.8.1] - 2026-10-07
 
 ### Added
