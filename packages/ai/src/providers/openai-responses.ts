@@ -179,6 +179,26 @@ const OPENAI_RESPONSES_CHAIN_STALE_FAILURE_LIMIT = 3;
 const OPENAI_RESPONSES_MAX_TRANSIENT_STREAM_RETRIES = 1;
 const OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS = 500;
 
+function isEncryptedReasoningOwnershipError(error: unknown): boolean {
+	return (
+		error instanceof OpenAIHttpError &&
+		error.status === 400 &&
+		/reasoning.*encrypted_content.*not issued to this caller/i.test(error.message)
+	);
+}
+
+function dropEncryptedReasoningItems(input: ResponseInput): boolean {
+	const first = input.findIndex(item => item.type === "reasoning" && typeof item.encrypted_content === "string");
+	if (first < 0) return false;
+	let write = first;
+	for (let read = first + 1; read < input.length; read++) {
+		const item = input[read];
+		if (item.type !== "reasoning" || typeof item.encrypted_content !== "string") input[write++] = item;
+	}
+	input.length = write;
+	return true;
+}
+
 function isOpenAIResponsesReplayUnsafeEvent(event: ResponseStreamEvent): boolean {
 	switch (event.type) {
 		case "response.output_text.delta":
@@ -394,6 +414,8 @@ async function* resumeOpenAIResponsesEventStream(
 interface OpenAIResponsesProviderSessionState
 	extends ProviderSessionState, OpenAIStrictToolsState, OpenAIReasoningEffortFallbackState {
 	nativeHistoryReplayWarmed: boolean;
+	/** Keep account-bound reasoning out of future requests after an ownership rejection. */
+	dropEncryptedReasoningHistory: boolean;
 	/** Stateful `previous_response_id` chain baselines, keyed by baseUrl/model/session. */
 	chains: Map<string, OpenAIResponsesChainState>;
 	/** `configuration_update` effort baselines, keyed by baseUrl/model/session. */
@@ -427,10 +449,12 @@ function createOpenAIResponsesProviderSessionState(): OpenAIResponsesProviderSes
 		...strictToolsState,
 		...reasoningEffortFallbackState,
 		nativeHistoryReplayWarmed: false,
+		dropEncryptedReasoningHistory: false,
 		chains: new Map(),
 		effortControls: new Map(),
 		close: () => {
 			state.nativeHistoryReplayWarmed = false;
+			state.dropEncryptedReasoningHistory = false;
 			state.chains.clear();
 			state.effortControls.clear();
 			clearOpenAIStrictToolsState(state);
@@ -532,11 +556,9 @@ function resetOpenAIResponsesChainState(state: OpenAIResponsesChainState): void 
  * baseline minted by one credential is dead weight the moment the session is
  * switched to a sibling account — the next delta request answers
  * `Previous response not found` and burns a turn re-learning that. Everything
- * else this record holds describes the *deployment*, not the account
- * (strict-tools demotion, reasoning-effort fallback, native-history-replay
- * warmup, the chaining circuit breaker), and is deliberately preserved:
- * re-learning an endpoint's limits on every credential switch is the cost this
- * state exists to avoid.
+ * else this record holds describes the deployment, not the account, and stays
+ * intact. A confirmed encrypted-reasoning ownership rejection remains active
+ * because the persisted history still contains the old blobs.
  */
 export function resetOpenAIResponsesAccountScopedState(states: Map<string, ProviderSessionState>): void {
 	for (const [key, value] of states) {
@@ -853,6 +875,7 @@ const streamOpenAIResponsesOnce = (
 			};
 			let strictRetryAvailable = true;
 			let activeStrictToolsApplied = builtParams.strictToolsApplied;
+			let ownershipRetryAvailable = true;
 			let forceDisableStrictTools = false;
 			const openResponsesStreamWithFallbacks = async (): Promise<AsyncIterable<ResponseStreamEvent>> => {
 				let openaiStream: AsyncIterable<ResponseStreamEvent>;
@@ -899,6 +922,19 @@ const streamOpenAIResponsesOnce = (
 								key: activeReasoningEffortFallbackKey,
 								fallback: reasoningEffortFallback,
 							};
+							continue;
+						}
+						if (
+							ownershipRetryAvailable &&
+							!requestSignal.aborted &&
+							isEncryptedReasoningOwnershipError(error) &&
+							Array.isArray(chained.params.input) &&
+							dropEncryptedReasoningItems(chained.params.input)
+						) {
+							ownershipRetryAvailable = false;
+							if (Array.isArray(activeParams.input)) dropEncryptedReasoningItems(activeParams.input);
+							if (providerSessionState) providerSessionState.dropEncryptedReasoningHistory = true;
+							activeRawRequestDump.body = chained.params;
 							continue;
 						}
 						const compiledGrammarTooLarge =
@@ -1560,6 +1596,11 @@ export function buildParams(
 			canReconstructReasoningReplay,
 		repairOrphanOutputs: true,
 	});
+	if (providerSessionState?.dropEncryptedReasoningHistory) {
+		// Native history, reconstructed signatures and compaction snapshots can
+		// all contain old blobs; filter the complete transport input.
+		dropEncryptedReasoningItems(messages);
+	}
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
 	let systemInstructions: string | undefined;
