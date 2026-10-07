@@ -22,6 +22,7 @@ import {
 	type CreateAgentSessionOptions,
 	type CustomTool,
 	createAgentSession,
+	customToolToDefinition,
 	discoverAuthStorage,
 	type ExtensionFactory,
 } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -906,6 +907,37 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			if (!runner) throw new Error("expected extension runner");
 			await runner.emit({ type: "session_start" });
 			expect(session.getToolByName(sdkCustomTool.name)?.label).toBe(sdkCustomTool.label);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("invokes customTools in their own execute argument order for both CustomTool and ToolDefinition", async () => {
+		const tempDir = makeTempDir();
+		const received = new Map<string, unknown>();
+		const probe = (name: string): CustomTool => ({
+			name,
+			label: name,
+			description: "Records the abort signal it receives.",
+			parameters: type({}),
+			async execute(_toolCallId, _params, _onUpdate, _ctx, signal) {
+				received.set(name, signal);
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		});
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [probe("probe_custom_tool"), customToolToDefinition(probe("probe_tool_definition"))],
+		});
+
+		try {
+			for (const name of ["probe_custom_tool", "probe_tool_definition"]) {
+				const tool = session.getToolByName(name);
+				if (!tool) throw new Error(`expected ${name} to be registered`);
+				await tool.execute(`${name}-call`, {}, new AbortController().signal, () => {});
+				expect(received.get(name)).toBeInstanceOf(AbortSignal);
+			}
 		} finally {
 			await session.dispose();
 		}

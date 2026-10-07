@@ -72,16 +72,17 @@ import { EventBus } from "../utils/event-bus";
 import { convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";
 import { ExtensionRuntime } from "./extensions/loader";
-import type {
-	BashToolResultEvent,
-	EditToolResultEvent,
-	ExtensionFactory,
-	GrepToolResultEvent,
-	ReadToolResultEvent,
-	ToolDefinition,
-	ToolResultEvent,
-	ToolShellEnvironmentContext,
-	WriteToolResultEvent,
+import {
+	type BashToolResultEvent,
+	type EditToolResultEvent,
+	type ExtensionFactory,
+	type GrepToolResultEvent,
+	markToolDefinition,
+	type ReadToolResultEvent,
+	type ToolDefinition,
+	type ToolResultEvent,
+	type ToolShellEnvironmentContext,
+	type WriteToolResultEvent,
 } from "./extensions/types";
 import { Type } from "./legacy-typebox";
 import { getEnabledPlugins, resolvePluginExtensionPaths, type ScopedInstalledPlugin } from "./plugins/loader";
@@ -90,7 +91,6 @@ import { loadSkillsFromDir } from "./skills";
 
 import { cfgDisabledExtensions, cfgExtensions, cfgSkills } from "./settings";
 
-const TOOL_DEFINITION_MARKER = "__isToolDefinition";
 const LEGACY_BUILTIN_TOOL_MARKER = "__ompLegacyBuiltinTool";
 const LEGACY_CODING_TOOL_NAMES = ["read", "bash", "edit", "write"] as const;
 const LEGACY_READ_ONLY_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
@@ -213,18 +213,6 @@ const legacyLsSchema = Type.Object({
 	path: Type.Optional(Type.String({ description: "Directory to list" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum entries" })),
 });
-
-function markToolDefinition<TParams extends TSchema, TDetails>(
-	tool: ToolDefinition<TParams, TDetails>,
-): ToolDefinition<TParams, TDetails> {
-	Object.defineProperty(tool, TOOL_DEFINITION_MARKER, {
-		value: true,
-		enumerable: false,
-		writable: false,
-		configurable: true,
-	});
-	return tool;
-}
 
 function legacyToolSession(cwd: string, settingOverrides?: LegacySettingOverrides): ToolSession {
 	return {

@@ -114,9 +114,11 @@ import {
 	ExtensionToolWrapper,
 	type ExtensionUIContext,
 	extensionToolSourceInfo,
+	isMarkedToolDefinition,
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
 	loadExtensions,
+	markToolDefinition,
 	type PreparedExtension,
 	type RegisteredTool,
 	type ToolDefinition,
@@ -633,7 +635,11 @@ export interface CreateAgentSessionOptions {
 	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
 	deadline?: number;
 
-	/** Custom tools to register (in addition to built-in tools). Accepts both CustomTool and ToolDefinition. */
+	/**
+	 * Custom tools to register (in addition to built-in tools). Accepts both CustomTool and ToolDefinition;
+	 * a ToolDefinition must carry the `markToolDefinition` marker (as `customToolToDefinition()` output does),
+	 * otherwise it is treated as a CustomTool.
+	 */
 	customTools?: (CustomTool | ToolDefinition)[];
 	/** Inline extensions (merged with discovery). */
 	extensions?: ExtensionFactory[];
@@ -1314,16 +1320,15 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 }
 
 function isCustomTool(tool: CustomTool | ToolDefinition): tool is CustomTool {
-	// To distinguish, we mark converted tools with a hidden symbol property.
-	// If the tool doesn't have this marker, it's a CustomTool that needs conversion.
-	return !(tool as any).__isToolDefinition;
+	// The two shapes are structurally identical except for `execute` argument order, so
+	// definitions are recognized only by the marker `markToolDefinition` sets.
+	return !isMarkedToolDefinition(tool);
 }
 
 function isLegacyBuiltinToolDefinition(tool: CustomTool | ToolDefinition): boolean {
 	return !isCustomTool(tool) && "__ompLegacyBuiltinTool" in tool && tool.__ompLegacyBuiltinTool === true;
 }
 
-const TOOL_DEFINITION_MARKER = Symbol("__isToolDefinition");
 /** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
 const MAX_MCP_INSTRUCTIONS_LENGTH = 4000;
 /** Built-ins `createTools` force-includes into explicit tool lists; the active set mirrors them. */
@@ -1354,7 +1359,7 @@ function registerEvalCleanup(): void {
 }
 
 export function customToolToDefinition(tool: CustomTool, sourcePath?: string): ToolDefinition {
-	const definition: ToolDefinition & { [TOOL_DEFINITION_MARKER]: true } = {
+	const definition: ToolDefinition = {
 		name: tool.name,
 		label: tool.label,
 		description: tool.description,
@@ -1389,9 +1394,8 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 					return component ?? ({ render: () => [] } as unknown as Component);
 				}
 			: undefined,
-		[TOOL_DEFINITION_MARKER]: true,
 	};
-	return definition;
+	return markToolDefinition(definition);
 }
 
 function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyMap<string, string>): ExtensionFactory {

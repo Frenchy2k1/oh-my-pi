@@ -743,6 +743,31 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	) => NativeToolView | undefined;
 }
 
+/** Property key flagging an object as a built {@link ToolDefinition} rather than a `CustomTool`. */
+const TOOL_DEFINITION_MARKER = "__isToolDefinition";
+
+/**
+ * Flags `tool` as a {@link ToolDefinition} (non-enumerable, in place) so mixed SDK `customTools`
+ * lists register it as-is instead of re-wrapping it with `CustomTool` argument order.
+ * Called by `customToolToDefinition()` and the legacy shim's `defineTool()`.
+ */
+export function markToolDefinition<TParams extends TSchema, TDetails>(
+	tool: ToolDefinition<TParams, TDetails>,
+): ToolDefinition<TParams, TDetails> {
+	Object.defineProperty(tool, TOOL_DEFINITION_MARKER, {
+		value: true,
+		enumerable: false,
+		writable: false,
+		configurable: true,
+	});
+	return tool;
+}
+
+/** Whether `tool` was flagged by {@link markToolDefinition}. */
+export function isMarkedToolDefinition(tool: object): boolean {
+	return TOOL_DEFINITION_MARKER in tool && tool[TOOL_DEFINITION_MARKER] === true;
+}
+
 /** Whether a tool's source is scoped to the user, the project, or a transient runtime session. */
 export type SourceScope = "user" | "project" | "temporary";
 
