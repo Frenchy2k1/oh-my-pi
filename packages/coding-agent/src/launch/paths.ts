@@ -22,49 +22,60 @@ export const DAEMON_META_FILE = "meta.json";
 export const DAEMON_SPEC_FILE = "spec.json";
 
 /**
- * Suffix of a runtime-dir symlink recording that `<name>` lives outside the
- * scope (a Snap-confined Chromium cannot write the runtime dir, so its profile
- * is mirrored under `$SNAP_USER_COMMON/omp/<original path>`). Pruning the scope
- * removes the link target too; see {@link removeRelocatedRuntimeData}.
+ * Target of the relocation symlink at runtime-dir path `link`, or undefined
+ * when `link` is not one. A target counts only when it mirrors the link's own
+ * path under an `omp` dir (`<prefix>/omp/<link path>`), so a stray or hand-made
+ * link never leads a delete into unrelated data.
  */
-const RELOCATED_SUFFIX = ".relocated";
+async function relocatedTarget(link: string): Promise<string | undefined> {
+	let target: string;
+	try {
+		target = await fs.readlink(link);
+	} catch {
+		return undefined; // Missing or not a symlink.
+	}
+	return path.isAbsolute(target) && target.endsWith(path.join(`${path.sep}omp`, link)) ? target : undefined;
+}
 
 /**
- * Record that runtime-dir path `original` is stored at `relocated`, so pruning
- * the scope reclaims it. Best-effort: a failed link only costs the reclaim.
+ * Make runtime-dir path `original` name the data actually stored at `actual`.
+ *
+ * A launcher that cannot write the runtime dir stores the data elsewhere (a
+ * Snap-confined Chromium mirrors its profile under
+ * `$SNAP_USER_COMMON/omp/<original path>`). That replaces whatever sits at
+ * `original` with a symlink to `actual`, so the scope still owns the data and
+ * pruning reclaims it ({@link removeRelocatedRuntimeData}). When `actual` is
+ * `original` again, a link left by an earlier relocation is dropped along with
+ * its target, so the caller recreates a real directory there.
+ *
+ * Best-effort: a failure costs only the reclaim, never the launch.
  */
-export async function linkRelocatedRuntimeData(original: string, relocated: string): Promise<void> {
-	const link = `${original}${RELOCATED_SUFFIX}`;
+export async function placeRuntimeData(original: string, actual: string): Promise<void> {
 	try {
-		if ((await fs.readlink(link).catch(() => undefined)) === relocated) return;
-		await fs.rm(link, { force: true });
-		await fs.symlink(relocated, link);
+		if (actual === original) {
+			const stale = await relocatedTarget(original);
+			if (stale === undefined) return;
+			await fs.rm(original, { force: true });
+			await fs.rm(stale, { recursive: true, force: true });
+			return;
+		}
+		if ((await fs.readlink(original).catch(() => undefined)) === actual) return;
+		await fs.rm(original, { recursive: true, force: true });
+		await fs.symlink(actual, original);
 	} catch (error) {
-		if (hasFsCode(error, "EEXIST")) return; // A concurrent client recorded it first.
-		logger.warn("Failed to record relocated daemon runtime data", {
-			link,
+		if (hasFsCode(error, "EEXIST")) return; // A concurrent client linked it first.
+		logger.warn("Failed to place daemon runtime data", {
+			original,
 			error: error instanceof Error ? error.message : String(error),
 		});
 	}
 }
 
-/**
- * Remove the out-of-scope data recorded by {@link linkRelocatedRuntimeData} in
- * `runtimeDir`. Only a target mirroring its original path under an `omp` dir
- * is deleted, so a stray or hand-made link never reaches unrelated data.
- */
+/** Remove the out-of-scope data that relocation links in `runtimeDir` point at; see {@link placeRuntimeData}. */
 export async function removeRelocatedRuntimeData(runtimeDir: string): Promise<void> {
 	for (const name of await fs.readdir(runtimeDir)) {
-		if (!name.endsWith(RELOCATED_SUFFIX)) continue;
-		const original = path.join(runtimeDir, name.slice(0, -RELOCATED_SUFFIX.length));
-		let target: string;
-		try {
-			target = await fs.readlink(path.join(runtimeDir, name));
-		} catch {
-			continue; // Not a symlink.
-		}
-		if (!path.isAbsolute(target) || !target.endsWith(path.join(`${path.sep}omp`, original))) continue;
-		await fs.rm(target, { recursive: true, force: true });
+		const target = await relocatedTarget(path.join(runtimeDir, name));
+		if (target !== undefined) await fs.rm(target, { recursive: true, force: true });
 	}
 }
 

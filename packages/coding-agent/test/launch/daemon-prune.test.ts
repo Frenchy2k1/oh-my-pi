@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { linkRelocatedRuntimeData } from "../../src/launch/paths";
+import { placeRuntimeData } from "../../src/launch/paths";
 import { pruneDeadDaemonRuntimeDirs } from "../../src/launch/presence";
 
 const STALE = new Date(Date.now() - 30 * 60_000);
@@ -82,11 +82,15 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 			const profile = path.join(dir, "omp.browser.headless.profile");
 			const relocated = target ?? path.join(snapOmp, profile);
 			await fs.mkdir(path.join(relocated, "Default"), { recursive: true });
-			await linkRelocatedRuntimeData(profile, relocated);
+			await placeRuntimeData(profile, relocated);
 			await fs.utimes(dir, STALE, STALE);
 			return relocated;
 		};
-		const dead = await relocate(await scope(daemons, "bbbbbbbbbbbbbbbb", { pid: "dead", stale: true }));
+		// A real profile from an earlier non-Snap Chromium is shadowed by the link.
+		const deadScope = await scope(daemons, "bbbbbbbbbbbbbbbb", { pid: "dead", stale: true });
+		await fs.mkdir(path.join(deadScope, "omp.browser.headless.profile", "Default"), { recursive: true });
+		const dead = await relocate(deadScope);
+		expect(await fs.readlink(path.join(deadScope, "omp.browser.headless.profile"))).toBe(dead);
 		const live = await relocate(await scope(daemons, "cccccccccccccccc", { pid: process.pid, stale: true }));
 		// A link whose target does not mirror the scope path is never followed into a delete.
 		const foreign = await relocate(
@@ -101,6 +105,21 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 		expect(await fs.exists(live)).toBe(true);
 		expect(await fs.exists(foreign)).toBe(true);
 		expect(await fs.exists(path.join(daemons, "dddddddddddddddd"))).toBe(false);
+	});
+
+	it("drops a relocation link and its target when the profile returns to the standard path", async () => {
+		using tempDir = TempDir.createSync("@omp-daemon-relocation-return-");
+		const profile = path.join(tempDir.path(), "run", "daemons", "aaaaaaaaaaaaaaaa", "omp.browser.headless.profile");
+		const relocated = path.join(tempDir.path(), "snap", "chromium", "common", "omp", profile);
+		await fs.mkdir(path.join(relocated, "Default"), { recursive: true });
+		await fs.mkdir(path.dirname(profile), { recursive: true });
+		await placeRuntimeData(profile, relocated);
+
+		await placeRuntimeData(profile, profile);
+		await fs.mkdir(profile, { recursive: true });
+
+		expect((await fs.lstat(profile)).isDirectory()).toBe(true);
+		expect(await fs.exists(relocated)).toBe(false);
 	});
 
 	it("never sweeps outside the daemons container when a runtime dir is relocated (issue #8721)", async () => {
