@@ -9,7 +9,9 @@ it("recovers a session when the new credential cannot replay old encrypted reaso
 	const requests: unknown[] = [];
 	let responseCount = 0;
 	const fetch: FetchImpl = async (_url, init) => {
-		const body: { input: Array<{ type?: string; encrypted_content?: string }> } = JSON.parse(String(init?.body));
+		const body: { input: Array<{ type?: string; encrypted_content?: string; call_id?: string }> } = JSON.parse(
+			String(init?.body),
+		);
 		requests.push(body.input);
 		const oldCredential = new Headers(init?.headers).get("Authorization") === "Bearer old-account-key";
 		if (
@@ -26,37 +28,91 @@ it("recovers a session when the new credential cannot replay old encrypted reaso
 				{ status: 400, headers: { "content-type": "application/json" } },
 			);
 		}
+		if (
+			!oldCredential &&
+			body.input.some(item => item.type === "function_call" && item.call_id === "call_new") &&
+			!body.input.some(item => item.type === "reasoning" && item.encrypted_content === "replacement-account-payload")
+		) {
+			return new Response(
+				JSON.stringify({
+					error: { message: "tool call missing its reasoning item", type: "invalid_request_error" },
+				}),
+				{ status: 400, headers: { "content-type": "application/json" } },
+			);
+		}
 		responseCount++;
 		const id = `resp_${responseCount}`;
-		const text =
-			responseCount === 1 ? "Previous answer" : responseCount === 2 ? "Recovered answer" : "Continued answer";
+		const text = responseCount === 1 ? "Previous answer" : "Continued answer";
+		const toolArguments = '{"path":"note.txt"}';
 		const events = [
 			{ type: "response.created", response: { id, status: "in_progress" } },
-			...(oldCredential
+			...(responseCount < 3
 				? [
 						{
 							type: "response.output_item.done",
 							output_index: 0,
 							item: {
 								type: "reasoning",
-								id: "rs_previous",
+								id: responseCount === 1 ? "rs_previous" : "rs_replacement",
 								summary: [],
-								encrypted_content: "previous-account-payload",
+								encrypted_content:
+									responseCount === 1 ? "previous-account-payload" : "replacement-account-payload",
 							},
 						},
 					]
 				: []),
-			{
-				type: "response.output_item.done",
-				output_index: oldCredential ? 1 : 0,
-				item: {
-					type: "message",
-					id: `msg_${id}`,
-					role: "assistant",
-					status: "completed",
-					content: [{ type: "output_text", text }],
-				},
-			},
+			...(responseCount === 2
+				? [
+						{
+							type: "response.output_item.added",
+							output_index: 1,
+							item: {
+								type: "function_call",
+								id: "fc_new",
+								call_id: "call_new",
+								name: "read",
+								arguments: "",
+								status: "in_progress",
+							},
+						},
+						{
+							type: "response.function_call_arguments.delta",
+							output_index: 1,
+							item_id: "fc_new",
+							delta: toolArguments,
+						},
+						{
+							type: "response.function_call_arguments.done",
+							output_index: 1,
+							item_id: "fc_new",
+							arguments: toolArguments,
+						},
+						{
+							type: "response.output_item.done",
+							output_index: 1,
+							item: {
+								type: "function_call",
+								id: "fc_new",
+								call_id: "call_new",
+								name: "read",
+								arguments: toolArguments,
+								status: "completed",
+							},
+						},
+					]
+				: [
+						{
+							type: "response.output_item.done",
+							output_index: oldCredential ? 1 : 0,
+							item: {
+								type: "message",
+								id: `msg_${id}`,
+								role: "assistant",
+								status: "completed",
+								content: [{ type: "output_text", text }],
+							},
+						},
+					]),
 			{ type: "response.completed", response: { id, status: "completed" } },
 		];
 		return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
@@ -78,15 +134,31 @@ it("recovers a session when the new credential cannot replay old encrypted reaso
 	const recovered = await streamOpenAIResponses(model, firstContext, options).result();
 	const continued = await streamOpenAIResponses(
 		model,
-		{ messages: [...firstContext.messages, recovered, { role: "user", content: "One more", timestamp: 4 }] },
+		{
+			messages: [
+				...firstContext.messages,
+				recovered,
+				{
+					role: "toolResult",
+					toolCallId: "call_new|fc_new",
+					toolName: "read",
+					content: [{ type: "text", text: "note contents" }],
+					isError: false,
+					timestamp: 4,
+				},
+			],
+		},
 		options,
 	).result();
 
 	expect(assistant.stopReason).toBe("stop");
-	expect(recovered.stopReason).toBe("stop");
-	expect(recovered.content.filter(block => block.type === "text").map(block => block.text)).toContain(
-		"Recovered answer",
-	);
+	expect(recovered.stopReason).toBe("toolUse");
+	expect(recovered.content.find(block => block.type === "toolCall")).toMatchObject({
+		id: "call_new|fc_new",
+		name: "read",
+		arguments: { path: "note.txt" },
+	});
+	expect(continued.stopReason).toBe("stop");
 	expect(continued.content.filter(block => block.type === "text").map(block => block.text)).toContain(
 		"Continued answer",
 	);
@@ -94,6 +166,7 @@ it("recovers a session when the new credential cannot replay old encrypted reaso
 	expect(JSON.stringify(requests[1])).toContain("previous-account-payload");
 	expect(JSON.stringify(requests[2])).toContain("Previous answer");
 	expect(JSON.stringify(requests.slice(2))).not.toContain("previous-account-payload");
+	expect(JSON.stringify(requests[3])).toContain("replacement-account-payload");
 });
 
 it("does not retry unrelated invalid requests", async () => {
