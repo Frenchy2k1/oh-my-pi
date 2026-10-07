@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed retired OpenRouter models (e.g. `stealth/ox-alpha`) staying selectable after `omp models refresh` and failing with `400 Model is unavailable`; a successful OpenRouter listing now removes chat models it no longer serves ([#14882](https://github.com/can1357/oh-my-pi/issues/14882)).
+- Fixed custom OpenRouter gateways reusing the official model cache, which could hide available models until the cache expired ([#14882](https://github.com/can1357/oh-my-pi/issues/14882)).
 
 ## [18.8.3] - 2026-10-07
 

@@ -1,7 +1,11 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it } from "bun:test";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 const CHAT_PAYLOAD = {
 	data: [
@@ -258,6 +262,56 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 			contextWindow: null,
 			maxTokens: null,
 		});
+	});
+
+	it("discovers a custom gateway instead of pruning against the official cache", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openrouter-cache-scope-"));
+		const cacheDbPath = path.join(dir, "models.db");
+		const official = "https://openrouter.ai/api/v1";
+		const gateway = "https://gateway.example/openrouter/v1";
+		const requested: string[] = [];
+		try {
+			const fetch: FetchImpl = async input => {
+				const url = String(input);
+				requested.push(url);
+				if (url === `${official}/models`) return Response.json(CHAT_PAYLOAD);
+				if (url === `${gateway}/models`) {
+					return Response.json({
+						data: [{ id: "gateway/only", name: "Gateway Only", supported_parameters: ["tools"] }],
+					});
+				}
+				return Response.json({ data: [] });
+			};
+			const officialOptions = openrouterModelManagerOptions({ fetch });
+			const gatewayOptions = openrouterModelManagerOptions({ baseUrl: `${gateway}/`, fetch });
+			const officialResult = await resolveProviderModels(
+				{ ...officialOptions, staticModels: [], cacheDbPath },
+				"online",
+			);
+			expect(officialResult.models.map(model => model.id)).toContain("openrouter/auto");
+
+			const gatewayResult = await resolveProviderModels(
+				{ ...gatewayOptions, staticModels: [], cacheDbPath },
+				"online-if-uncached",
+			);
+			expect(gatewayResult.source).toBe("provider");
+			expect(gatewayResult.models.map(model => model.id)).toEqual(["gateway/only"]);
+			expect(requested).toContain(`${gateway}/models`);
+
+			// Startup reads the namespace without creating the manager or resolving a key.
+			expect(gatewayOptions.cacheProviderId).toBe(
+				resolveModelCacheProviderId("openrouter", { baseUrl: `${gateway}/` }),
+			);
+			expect(officialOptions.cacheProviderId).toBe(resolveModelCacheProviderId("openrouter"));
+			const restored = await resolveProviderModels(
+				{ ...officialOptions, staticModels: [], cacheDbPath },
+				"online-if-uncached",
+			);
+			expect(restored.source).toBe("cache");
+			expect(restored.models.map(model => model.id)).toContain("openrouter/auto");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	describe("bundled rows the live roster omits (#14882)", () => {

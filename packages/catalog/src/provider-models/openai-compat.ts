@@ -3314,15 +3314,14 @@ function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConf
 
 export function openrouterModelManagerOptions(config?: OpenRouterModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
-	const baseUrl = (config?.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/+$/g, "");
+	const baseUrl = (config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("openrouter")!).replace(/\/+$/g, "");
 	const decisionsBaseUrl = openrouterDecisionsBaseUrl(baseUrl);
 	const references = createBundledReferenceMap<"openrouter">("openrouter");
 	return {
 		providerId: "openrouter",
-		// Older builds cached OpenRouter discovery rows as `api: "openai-completions"`.
-		// Namespace the refreshed pseudo-API cache separately so those rows cannot
-		// override bundled `api: "openrouter"` models during online-if-uncached startup.
-		cacheProviderId: resolveModelCacheProviderId("openrouter"),
+		// Keep the official pseudo-API namespace, but isolate custom gateways:
+		// their authoritative catalogs can differ from OpenRouter's own roster.
+		cacheProviderId: resolveModelCacheProviderId("openrouter", { baseUrl }),
 		// `createModelManager()` prunes bundled chat rows the live roster omits.
 		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: async () => {
