@@ -149,6 +149,91 @@ describe("AgentSession aside delivery", () => {
 		expect(asides).toHaveLength(1);
 	});
 
+	it("ends an interruptible wait for a queued aside without completing its job", async () => {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		const contexts: Context[] = [];
+		const started = Promise.withResolvers<void>();
+		const job = Promise.withResolvers<void>();
+		let jobFinished = false;
+		let waitInterrupted = false;
+		// The real loop polls session-owned asides every 250 ms; this watchdog
+		// releases a broken wait so the test can report the missing interruption.
+		const watchdog = setTimeout(() => {
+			jobFinished = true;
+			job.resolve();
+		}, 5_000);
+		const wait: AgentTool = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait for background work",
+			parameters: type({}),
+			interruptible: true,
+			async execute(_id, _params, signal) {
+				started.resolve();
+				const aborted = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+				await Promise.race([job.promise, aborted.promise]);
+				waitInterrupted = signal?.aborted === true;
+				return { content: [{ type: "text", text: waitInterrupted ? "Wait interrupted" : "Job completed" }] };
+			},
+		};
+		let calls = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [wait], messages: [] },
+			convertToLlm,
+			streamFn: (_model, context) => {
+				contexts.push(context);
+				const waiting = calls++ === 0;
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: waiting
+						? [{ type: "toolCall", id: "wait-1", name: "wait", arguments: {} }]
+						: [{ type: "text", text: "Acknowledged." }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: zeroUsage,
+					stopReason: waiting ? "toolUse" : "stop",
+					timestamp: Date.now(),
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: waiting ? "toolUse" : "stop", message });
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map([[wait.name, wait]]),
+		});
+		try {
+			const run = session.prompt("go");
+			await started.promise;
+			await session.sendCustomMessage(
+				{ customType: "extension-aside", content: "ASIDE_DURING_WAIT", display: false, attribution: "agent" },
+				{ deliverAs: "aside" },
+			);
+			await run;
+			expect(waitInterrupted).toBe(true);
+			expect(jobFinished).toBe(false);
+			expect(JSON.stringify(contexts[1]?.messages)).toContain("ASIDE_DURING_WAIT");
+			expect(
+				session.agent.state.messages.filter(m => m.role === "custom" && m.customType === "extension-aside"),
+			).toHaveLength(1);
+		} finally {
+			clearTimeout(watchdog);
+			job.resolve();
+		}
+	});
+
 	it("sendUserMessage delivered as an aside mid-run injects at the next step boundary without draining agent-core queues", async () => {
 		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
 		const modelRegistry = new ModelRegistry(authStorage);

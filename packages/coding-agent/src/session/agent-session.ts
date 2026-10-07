@@ -1887,11 +1887,11 @@ export class AgentSession implements SettingsScope {
 				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
 			build: buildLaunchCompletionBatchMessage,
 		});
-		// Background-job completions / late diagnostics are pulled into the run at
-		// each step boundary as non-interrupting asides. Peer IRCs share the aside
-		// injection boundary, but also expose a non-consuming interrupt peek so
-		// `wait` can return early before the boundary drains them.
+		// Session-owned asides inject at the next step boundary. Peer IRCs and
+		// extension asides also expose non-consuming peeks so an interruptible
+		// `wait` returns early; parked peer wakes remain outside the aside queue.
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
+		this.agent.hasQueuedAsides = () => this.#irc.hasAsides();
 		// Completion notices (finished background jobs, exited supervised
 		// processes) queue here for the same boundary; peeking them lets a
 		// `wait` return early rather than miss a queued completion. Entries
@@ -5374,6 +5374,7 @@ export class AgentSession implements SettingsScope {
 		this.yieldQueue.clear();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
+		this.agent.hasQueuedAsides = undefined;
 		this.agent.hasBackgroundCompletions = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();

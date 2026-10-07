@@ -3271,6 +3271,69 @@ describe("agentLoop with AgentMessage", () => {
 		).toBe(true);
 	});
 
+	it("delivers a queued aside before an interruptible wait's job completes", async () => {
+		const toolSchema = type({});
+		const aside = createUserMessage("extension aside");
+		let queued = false;
+		let interrupted = false;
+		let completed = false;
+		const completion = Promise.withResolvers<void>();
+		// Exercise the loop's real 250 ms poll; this watchdog models a job
+		// completing later and keeps a failed wake from hanging the suite.
+		const timer = setTimeout(() => {
+			completed = true;
+			completion.resolve();
+		}, 5_000);
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait for owned work",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_id, _args, signal) {
+				queued = true;
+				const abort = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => abort.resolve(), { once: true });
+				await Promise.race([completion.promise, abort.promise]);
+				interrupted = signal?.aborted === true;
+				return { content: [{ type: "text", text: interrupted ? "interrupted" : "job finished" }], details: {} };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "wait-1", name: "wait", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			hasQueuedAsides: () => queued,
+			getAsideMessages: async () => {
+				if (!queued) return [];
+				queued = false;
+				return [() => aside];
+			},
+		};
+		const events: AgentEvent[] = [];
+		try {
+			for await (const event of agentLoop(
+				[createUserMessage("start")],
+				{ systemPrompt: [""], messages: [], tools: [tool] },
+				config,
+				undefined,
+				mock.stream,
+			)) {
+				events.push(event);
+			}
+		} finally {
+			clearTimeout(timer);
+		}
+		expect(interrupted).toBe(true);
+		expect(completed).toBe(false);
+		expect(events.filter(e => e.type === "message_start" && e.message === aside)).toHaveLength(1);
+	});
+
 	it("leaves the cooperative steering signal down for a queued background completion", async () => {
 		const toolSchema = type({});
 		let drained = false;

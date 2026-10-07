@@ -6,6 +6,10 @@
 
 - Sped up tool-output pruning and telemetry message capture on long sessions ([#14678](https://github.com/can1357/oh-my-pi/pull/14678) by [@H4vC](https://github.com/H4vC))
 
+### Fixed
+
+- Queued asides now end interruptible waits so the next model step receives them without waiting for background work ([#14732](https://github.com/can1357/oh-my-pi/issues/14732))
+
 ## [18.7.0] - 2026-10-06
 
 ### Fixed

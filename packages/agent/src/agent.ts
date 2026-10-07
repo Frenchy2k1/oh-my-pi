@@ -534,6 +534,8 @@ export class Agent {
 	 * Hook that peeks whether interrupting IRC asides are queued for the next boundary.
 	 */
 	hasIrcInterrupts?: AgentLoopConfig["hasIrcInterrupts"];
+	/** Peeks whether the next boundary has an aside that should end an interruptible wait. */
+	hasQueuedAsides?: AgentLoopConfig["hasQueuedAsides"];
 	/**
 	 * Hook that peeks whether background completions (jobs, supervised processes)
 	 * are queued for the next boundary.
@@ -1172,9 +1174,8 @@ export class Agent {
 	}
 
 	/**
-	 * Provide a source of non-interrupting "aside" messages (e.g. background-job
-	 * completions, late LSP diagnostics) drained at each step boundary. Never
-	 * aborts in-flight tools. See `AgentLoopConfig.getAsideMessages`.
+	 * Provide asides drained at each step boundary. Queued asides end interruptible
+	 * waits early, but do not abort foreground tools. See `AgentLoopConfig.getAsideMessages`.
 	 */
 	setAsideMessageProvider(fn: (() => AsideMessage[] | Promise<AsideMessage[]>) | undefined): void {
 		this.#asideMessageProvider = fn;
@@ -1912,6 +1913,7 @@ export class Agent {
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
 			hasIrcInterrupts: this.hasIrcInterrupts,
+			hasQueuedAsides: this.hasQueuedAsides,
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],

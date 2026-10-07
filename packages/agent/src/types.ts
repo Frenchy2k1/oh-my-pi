@@ -316,6 +316,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	hasIrcInterrupts?: () => boolean | Promise<boolean>;
 	/**
+	 * Peeks queued asides that the next step boundary will inject without consuming them.
+	 * Only interruptible waits stop early; foreground work and its cooperative signal are unchanged.
+	 */
+	hasQueuedAsides?: () => boolean | Promise<boolean>;
+	/**
 	 * Peeks whether a background completion (finished job, exited supervised
 	 * process) is queued for aside injection at the next boundary.
 	 *
@@ -338,14 +343,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getFollowUpMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 	/**
-	 * Returns non-interrupting "aside" messages to inject at a step boundary.
+	 * Returns "aside" messages to inject at a step boundary.
 	 *
-	 * Polled after each tool batch (before the next LLM call) AND at the yield
-	 * check. Unlike steering, these NEVER abort in-flight tools — they are passive
-	 * notifications (e.g. background-job completions, late LSP diagnostics) that
-	 * should reach the model between requests without waiting for the agent to
-	 * fully stop. Returned messages are appended to the context with normal
-	 * message events and keep the loop running so the model can react.
+	 * Polled after each tool batch (before the next LLM call) and at the yield
+	 * check. Queued asides end interruptible waits early, but do not interrupt
+	 * foreground tools. Returned messages enter context with normal message
+	 * events and keep the loop running so the model can react.
 	 */
 	getAsideMessages?: () => Promise<AsideMessage[]>;
 	/**

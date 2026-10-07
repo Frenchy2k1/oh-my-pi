@@ -3209,6 +3209,7 @@ async function executeToolCalls(
 	const {
 		hasSteeringMessages,
 		hasIrcInterrupts,
+		hasQueuedAsides,
 		hasBackgroundCompletions,
 		interruptMode = "immediate",
 		getToolContext,
@@ -3304,18 +3305,16 @@ async function executeToolCalls(
 	});
 
 	const checkAsideInterrupts = async (): Promise<void> => {
-		// Asides only fire once: an interrupt already recorded on interruptState
-		// must not re-abort, and (unlike steering) never re-consumes a queue.
-		// A completion-triggered record is the exception — it leaves the
-		// cooperative signal down, so keep polling until a peer IRC escalates
-		// (only when soft interrupts are enabled; otherwise nothing is left).
+		// A recorded interrupt never re-aborts or consumes a queue. Keep polling
+		// if a non-urgent aside won first so a later peer IRC can still raise
+		// the cooperative signal for foreground tools.
 		if (signal?.aborted) return;
 		if (interruptState.triggered && (!softInterrupts || steeringSoftController.signal.aborted)) return;
-		// Peer IRC and background completions (finished jobs, exited supervised
-		// processes) hard-abort interruptible waits only; foreground tools keep
-		// running (no partial side effects).
+		// Only interruptible waits hard-abort; foreground tools keep running
+		// without partial side effects or cooperative auto-backgrounding.
 		let source: AsideInterruptSource | undefined;
 		if (hasIrcInterrupts && (await hasIrcInterrupts())) source = "irc";
+		else if (!interruptState.triggered && hasQueuedAsides && (await hasQueuedAsides())) source = "aside";
 		else if (!interruptState.triggered && hasBackgroundCompletions && (await hasBackgroundCompletions()))
 			source = "background";
 		if (!source) return;
@@ -3324,15 +3323,11 @@ async function executeToolCalls(
 			interruptState.source = source;
 			ircAbortController.abort(TOOL_INTERRUPT_ABORT_REASON);
 		}
-		// Only an urgent aside raises the cooperative signal that makes
-		// backgroundable foreground work (auto-background bash/eval) detach
-		// itself. A peer waiting on an IRC is blocked on this batch; a finished
-		// background job is not — its notice is an aside that injects at the
-		// batch boundary either way. Detaching ordinary foreground work for it
-		// also cascades: the freshly detached job's own completion re-triggers
-		// this check for the next command, so millisecond-long commands chain
-		// into separate background deliveries (#12869).
-		if (source !== "background" && softInterrupts) steeringSoftController.abort();
+		// Only peer IRC raises the cooperative signal: a peer may be blocked
+		// on this batch, whereas queued asides and completion notices inject at
+		// the boundary without detaching ordinary foreground work. Detaching
+		// for a completion can cascade across subsequent commands (#12869).
+		if (source === "irc" && softInterrupts) steeringSoftController.abort();
 	};
 
 	const checkSteering = async (): Promise<void> => {
@@ -3696,14 +3691,13 @@ async function executeToolCalls(
 	let sharedTasks: Promise<void>[] = [];
 	const tasks: Promise<void>[] = [];
 
-	// While tool calls are in flight, queued steering or interrupting IRC would
+	// While tool calls are in flight, queued steering, IRC, or asides would
 	// otherwise wait out the tools' own window. Poll only non-consuming queues:
-	// detection hard-aborts interruptible waits (running or not yet started),
-	// and steering/IRC additionally soft-signal cooperative tools
-	// (auto-background bash), so the boundary dequeue below injects the message
-	// promptly. In "wait" mode only a batch holding an interruptible wait needs
-	// the watch; checkSteering is idempotent (no-op once triggered).
-	const hasAsidePeek = hasIrcInterrupts !== undefined || hasBackgroundCompletions !== undefined;
+	// detection hard-aborts interruptible waits (running or not yet started).
+	// Steering/IRC may also soft-signal cooperative tools. In "wait" mode only
+	// a batch holding an interruptible wait needs the watch.
+	const hasAsidePeek =
+		hasIrcInterrupts !== undefined || hasQueuedAsides !== undefined || hasBackgroundCompletions !== undefined;
 	const watchSteeringWhileRunning =
 		(softInterrupts || records.some(record => record.interruptible)) &&
 		(hasSteeringMessages !== undefined || hasAsidePeek);
@@ -3758,9 +3752,9 @@ async function executeToolCalls(
 				}
 			})()
 		: undefined;
-	// IRC interrupt records and background completions live in session-owned
-	// queues with no wake callback. Keep the timer fallback when either peek is
-	// present; system steering uses the event-driven path above and does not poll.
+	// Session-owned IRC, aside, and completion queues have no wake callback.
+	// Keep the timer fallback when any peek is present; system steering uses
+	// the event-driven path above and does not poll.
 	const steeringWatchTimer =
 		watchSteeringWhileRunning && (!eventDrivenSteeringWatch || hasAsidePeek)
 			? setInterval(
@@ -3989,8 +3983,8 @@ function createToolSignalAbortedResult(signal: AbortSignal): AgentToolResult<unk
 	};
 }
 
-/** Origin of a mid-batch interrupt: queued steering, a peer IRC, or a background completion notice. */
-type AsideInterruptSource = SteeringInterruptSource | "irc" | "background";
+/** Origin of a mid-batch interrupt: queued steering, IRC, an aside, or a background completion. */
+type AsideInterruptSource = SteeringInterruptSource | "irc" | "aside" | "background";
 
 function createSkippedToolResult(
 	source: AsideInterruptSource | undefined,
@@ -4010,6 +4004,9 @@ function createSkippedToolResult(
 	} else if (source === "irc") {
 		reason = "pending peer interrupt";
 		blocker = "interrupt";
+	} else if (source === "aside") {
+		reason = "a queued aside";
+		blocker = "aside";
 	} else if (source === "background") {
 		reason = "a queued background completion (job or supervised process)";
 		blocker = "completion notice";
