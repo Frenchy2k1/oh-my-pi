@@ -339,6 +339,19 @@ function vteVersion(env: NodeJS.ProcessEnv): number | null {
 }
 
 /**
+ * Whether the active emulator is VTE rather than a child terminal that merely
+ * inherited `VTE_VERSION`. VTE pins `COLORTERM=truecolor` and defaults `TERM`
+ * to `xterm-256color`; emulators launched from it either replace `TERM`
+ * (xterm, foot, st, urxvt) or export their own marker (xterm, Konsole). A VTE
+ * host that overrides `TERM` stays on the conservative `trueColor` fallback.
+ */
+function isVteHost(env: NodeJS.ProcessEnv): boolean {
+	if ((vteVersion(env) ?? 0) < 5000) return false;
+	if (env.TERM !== "xterm-256color" || env.COLORTERM !== "truecolor") return false;
+	return !env.XTERM_VERSION && !env.KONSOLE_VERSION;
+}
+
+/**
  * Returns true when running in Windows Terminal with known SIXEL support.
  *
  * Windows Terminal introduced SIXEL support in preview 1.22.
@@ -798,7 +811,7 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 	if (TERM && caseEq(TERM, "monstar")) return "monstar";
 
 	// VTE_VERSION identifies the outer emulator, not a multiplexer in the path.
-	if (!isInsideTerminalMultiplexer(env) && (vteVersion(env) ?? 0) >= 5000) return "vte";
+	if (!isInsideTerminalMultiplexer(env) && isVteHost(env)) return "vte";
 
 	if (COLORTERM) {
 		if (caseEq(COLORTERM, "truecolor") || caseEq(COLORTERM, "24bit")) return "trueColor";

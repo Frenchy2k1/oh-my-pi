@@ -129,6 +129,17 @@ describe("detectTerminalId", () => {
 		expect(detectTerminalId({ ...older, VTE_VERSION: "8401", TERM: "screen-256color" })).toBe("trueColor");
 		expect(detectTerminalId({ ...older, VTE_VERSION: "8401", TERM_PROGRAM: "kitty" })).toBe("kitty");
 	});
+
+	it("ignores VTE_VERSION inherited by a non-VTE emulator launched from a VTE terminal", () => {
+		// VTE exports VTE_VERSION to every child, so xterm/Konsole/foot started
+		// from Ptyxis inherit it while owning their own PTY.
+		const inherited = { COLORTERM: "truecolor", VTE_VERSION: "8401" };
+		expect(detectTerminalId({ ...inherited, TERM: "xterm", XTERM_VERSION: "XTerm(397)" })).toBe("trueColor");
+		expect(detectTerminalId({ ...inherited, TERM: "xterm-256color", XTERM_VERSION: "XTerm(397)" })).toBe("trueColor");
+		expect(detectTerminalId({ ...inherited, TERM: "xterm-256color", KONSOLE_VERSION: "250401" })).toBe("trueColor");
+		expect(detectTerminalId({ ...inherited, TERM: "foot" })).toBe("trueColor");
+		expect(detectTerminalId({ VTE_VERSION: "8401", TERM: "xterm-256color", COLORTERM: "24bit" })).toBe("trueColor");
+	});
 });
 
 describe("tmux client terminal resolution", () => {
