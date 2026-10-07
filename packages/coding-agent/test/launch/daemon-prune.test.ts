@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { linkRelocatedRuntimeData } from "../../src/launch/paths";
 import { pruneDeadDaemonRuntimeDirs } from "../../src/launch/presence";
 
 const STALE = new Date(Date.now() - 30 * 60_000);
@@ -70,6 +71,36 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 		await pruneDeadDaemonRuntimeDirs(current);
 
 		expect(await fs.exists(sibling)).toBe(true);
+	});
+
+	it("reclaims a dead scope's relocated Snap profile but keeps live and foreign targets", async () => {
+		using tempDir = TempDir.createSync("@omp-daemon-prune-relocated-");
+		const daemons = path.join(tempDir.path(), "run", "daemons");
+		const snapOmp = path.join(tempDir.path(), "snap", "chromium", "common", "omp");
+		const current = await scope(daemons, "aaaaaaaaaaaaaaaa", { pid: "dead", stale: true });
+		const relocate = async (dir: string, target?: string): Promise<string> => {
+			const profile = path.join(dir, "omp.browser.headless.profile");
+			const relocated = target ?? path.join(snapOmp, profile);
+			await fs.mkdir(path.join(relocated, "Default"), { recursive: true });
+			await linkRelocatedRuntimeData(profile, relocated);
+			await fs.utimes(dir, STALE, STALE);
+			return relocated;
+		};
+		const dead = await relocate(await scope(daemons, "bbbbbbbbbbbbbbbb", { pid: "dead", stale: true }));
+		const live = await relocate(await scope(daemons, "cccccccccccccccc", { pid: process.pid, stale: true }));
+		// A link whose target does not mirror the scope path is never followed into a delete.
+		const foreign = await relocate(
+			await scope(daemons, "dddddddddddddddd", { pid: "dead", stale: true }),
+			path.join(tempDir.path(), "user-data"),
+		);
+
+		await pruneDeadDaemonRuntimeDirs(current);
+
+		expect(await fs.exists(dead)).toBe(false);
+		expect(await fs.exists(path.join(daemons, "bbbbbbbbbbbbbbbb"))).toBe(false);
+		expect(await fs.exists(live)).toBe(true);
+		expect(await fs.exists(foreign)).toBe(true);
+		expect(await fs.exists(path.join(daemons, "dddddddddddddddd"))).toBe(false);
 	});
 
 	it("never sweeps outside the daemons container when a runtime dir is relocated (issue #8721)", async () => {

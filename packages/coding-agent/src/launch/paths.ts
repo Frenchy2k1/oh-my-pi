@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getDaemonRuntimeDir, hasFsCode, isEacces, isEisdir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getDaemonRuntimeDir, hasFsCode, isEacces, isEisdir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 
 /** Resolve the private runtime directory shared by omp processes in one project directory. */
 export { getDaemonRuntimeDir as daemonRuntimeDir };
@@ -20,6 +20,53 @@ export const DAEMON_META_FILE = "meta.json";
  * still accept that layout and broker recovery migrates it.
  */
 export const DAEMON_SPEC_FILE = "spec.json";
+
+/**
+ * Suffix of a runtime-dir symlink recording that `<name>` lives outside the
+ * scope (a Snap-confined Chromium cannot write the runtime dir, so its profile
+ * is mirrored under `$SNAP_USER_COMMON/omp/<original path>`). Pruning the scope
+ * removes the link target too; see {@link removeRelocatedRuntimeData}.
+ */
+const RELOCATED_SUFFIX = ".relocated";
+
+/**
+ * Record that runtime-dir path `original` is stored at `relocated`, so pruning
+ * the scope reclaims it. Best-effort: a failed link only costs the reclaim.
+ */
+export async function linkRelocatedRuntimeData(original: string, relocated: string): Promise<void> {
+	const link = `${original}${RELOCATED_SUFFIX}`;
+	try {
+		if ((await fs.readlink(link).catch(() => undefined)) === relocated) return;
+		await fs.rm(link, { force: true });
+		await fs.symlink(relocated, link);
+	} catch (error) {
+		if (hasFsCode(error, "EEXIST")) return; // A concurrent client recorded it first.
+		logger.warn("Failed to record relocated daemon runtime data", {
+			link,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
+
+/**
+ * Remove the out-of-scope data recorded by {@link linkRelocatedRuntimeData} in
+ * `runtimeDir`. Only a target mirroring its original path under an `omp` dir
+ * is deleted, so a stray or hand-made link never reaches unrelated data.
+ */
+export async function removeRelocatedRuntimeData(runtimeDir: string): Promise<void> {
+	for (const name of await fs.readdir(runtimeDir)) {
+		if (!name.endsWith(RELOCATED_SUFFIX)) continue;
+		const original = path.join(runtimeDir, name.slice(0, -RELOCATED_SUFFIX.length));
+		let target: string;
+		try {
+			target = await fs.readlink(path.join(runtimeDir, name));
+		} catch {
+			continue; // Not a symlink.
+		}
+		if (!path.isAbsolute(target) || !target.endsWith(path.join(`${path.sep}omp`, original))) continue;
+		await fs.rm(target, { recursive: true, force: true });
+	}
+}
 
 /**
  * Canonicalize a project directory the same way every broker client does, so
