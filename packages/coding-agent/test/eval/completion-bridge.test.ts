@@ -21,6 +21,7 @@ import { IdleTimeout } from "../../src/eval/idle-timeout";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
+import { SessionManager } from "../../src/session/session-manager";
 import type { ToolSession } from "../../src/tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -101,6 +102,7 @@ function assistant(opts: {
 	toolCall?: { name: string; arguments: Record<string, unknown> };
 	stopReason?: AssistantMessage["stopReason"];
 	errorMessage?: string;
+	output?: number;
 }): AssistantMessage {
 	const content: AssistantMessage["content"] = [];
 	if (opts.text) content.push({ type: "text", text: opts.text });
@@ -115,10 +117,10 @@ function assistant(opts: {
 		model: "default",
 		usage: {
 			input: 0,
-			output: 0,
+			output: opts.output ?? 0,
 			cacheRead: 0,
 			cacheWrite: 0,
-			totalTokens: 0,
+			totalTokens: opts.output ?? 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: opts.stopReason ?? "stop",
@@ -338,6 +340,38 @@ describe("runEvalCompletion", () => {
 
 		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "b", "d", "e"]);
 		expect(result.text).toBe("e answer");
+	});
+
+	it("charges every returned attempt to the owning session's totals and turn budget", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/fallback"] });
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.beginTurnBudget(20, true);
+		session.sessionManager = sessionManager;
+		vi.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted", output: 3 }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer", output: 7 }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(result.text).toBe("fallback answer");
+		expect(sessionManager.getUsageStatistics().output).toBe(10);
+		expect(sessionManager.getTurnBudget()).toEqual({ total: 20, spent: 10, hard: true });
+		// Usage is journal-only; it never becomes conversation context.
+		expect(sessionManager.buildSessionContext().messages).toEqual([]);
+	});
+
+	it("charges a response that is rejected while parsing the result", async () => {
+		const session = makeSession();
+		const sessionManager = SessionManager.inMemory();
+		session.sessionManager = sessionManager;
+		vi.spyOn(ai, "completeSimple").mockResolvedValueOnce(assistant({ output: 5 }));
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toThrow(
+			"completion() returned no text output.",
+		);
+		expect(sessionManager.getUsageStatistics().output).toBe(5);
 	});
 
 	it("inherits the failed candidate's effort for bare nested entries", async () => {
