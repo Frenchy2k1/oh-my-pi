@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { placeRuntimeData } from "../../src/launch/paths";
+import { placeRuntimeData, removeRelocatedRuntimeData } from "../../src/launch/paths";
 import { pruneDeadDaemonRuntimeDirs } from "../../src/launch/presence";
 
 const STALE = new Date(Date.now() - 30 * 60_000);
@@ -107,7 +107,35 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 		expect(await fs.exists(path.join(daemons, "dddddddddddddddd"))).toBe(false);
 	});
 
-	it("drops a relocation link and its target when the profile returns to the standard path", async () => {
+	it("reclaims both Snap profiles after a dead scope retargets to another snap", async () => {
+		using tempDir = TempDir.createSync("@omp-daemon-prune-retarget-");
+		const daemons = path.join(tempDir.path(), "run", "daemons");
+		const current = await scope(daemons, "aaaaaaaaaaaaaaaa", { pid: "dead", stale: true });
+		const dead = await scope(daemons, "bbbbbbbbbbbbbbbb", { pid: "dead", stale: true });
+		const live = await scope(daemons, "cccccccccccccccc", { pid: process.pid, stale: true });
+		const profiles = async (dir: string) => {
+			const original = path.join(dir, "omp.browser.headless.profile");
+			const chromium = path.join(tempDir.path(), "snap", "chromium", "common", "omp", original);
+			const other = path.join(tempDir.path(), "snap", "other", "common", "omp", original);
+			await fs.mkdir(chromium, { recursive: true });
+			await fs.mkdir(other, { recursive: true });
+			await placeRuntimeData(original, chromium);
+			await placeRuntimeData(original, other);
+			await fs.utimes(dir, STALE, STALE);
+			return { chromium, other };
+		};
+		const old = await profiles(dead);
+		const active = await profiles(live);
+
+		await pruneDeadDaemonRuntimeDirs(current);
+
+		expect(await fs.exists(old.chromium)).toBe(false);
+		expect(await fs.exists(old.other)).toBe(false);
+		expect(await fs.exists(active.chromium)).toBe(true);
+		expect(await fs.exists(active.other)).toBe(true);
+	});
+
+	it("retains the Snap target for pruning when the profile returns to the standard path", async () => {
 		using tempDir = TempDir.createSync("@omp-daemon-relocation-return-");
 		const profile = path.join(tempDir.path(), "run", "daemons", "aaaaaaaaaaaaaaaa", "omp.browser.headless.profile");
 		const relocated = path.join(tempDir.path(), "snap", "chromium", "common", "omp", profile);
@@ -119,6 +147,8 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 		await fs.mkdir(profile, { recursive: true });
 
 		expect((await fs.lstat(profile)).isDirectory()).toBe(true);
+		expect(await fs.exists(relocated)).toBe(true); // Kept until the scope has no live broker.
+		await removeRelocatedRuntimeData(path.dirname(profile));
 		expect(await fs.exists(relocated)).toBe(false);
 	});
 

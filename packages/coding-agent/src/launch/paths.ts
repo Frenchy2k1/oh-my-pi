@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getDaemonRuntimeDir, hasFsCode, isEacces, isEisdir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getDaemonRuntimeDir, hasFsCode, isEacces, isEisdir, isEnoent } from "@oh-my-pi/pi-utils";
 
 /** Resolve the private runtime directory shared by omp processes in one project directory. */
 export { getDaemonRuntimeDir as daemonRuntimeDir };
@@ -22,19 +22,32 @@ export const DAEMON_META_FILE = "meta.json";
 export const DAEMON_SPEC_FILE = "spec.json";
 
 /**
- * Target of the relocation symlink at runtime-dir path `link`, or undefined
- * when `link` is not one. A target counts only when it mirrors the link's own
- * path under an `omp` dir (`<prefix>/omp/<link path>`), so a stray or hand-made
- * link never leads a delete into unrelated data.
+ * Target of a relocation symlink for `original`, or undefined when the link
+ * does not mirror that path under an `omp` dir. This excludes foreign links
+ * from profile cleanup.
  */
-async function relocatedTarget(link: string): Promise<string | undefined> {
+async function relocatedTarget(link: string, original: string = link): Promise<string | undefined> {
 	let target: string;
 	try {
 		target = await fs.readlink(link);
 	} catch {
 		return undefined; // Missing or not a symlink.
 	}
-	return path.isAbsolute(target) && target.endsWith(path.join(`${path.sep}omp`, link)) ? target : undefined;
+	return path.isAbsolute(target) && target.endsWith(path.join(`${path.sep}omp`, original)) ? target : undefined;
+}
+
+/** Retain a previous Snap profile until dead-scope pruning proves no daemon still uses it. */
+async function retainRelocatedTarget(original: string, target: string): Promise<void> {
+	for (let index = 1; ; index++) {
+		const marker = `${original}.relocated.${index}`;
+		try {
+			await fs.symlink(target, marker);
+			return;
+		} catch (error) {
+			if (!hasFsCode(error, "EEXIST")) throw error;
+			if ((await fs.readlink(marker).catch(() => undefined)) === target) return;
+		}
+	}
 }
 
 /**
@@ -44,37 +57,36 @@ async function relocatedTarget(link: string): Promise<string | undefined> {
  * Snap-confined Chromium mirrors its profile under
  * `$SNAP_USER_COMMON/omp/<original path>`). That replaces whatever sits at
  * `original` with a symlink to `actual`, so the scope still owns the data and
- * pruning reclaims it ({@link removeRelocatedRuntimeData}). When `actual` is
- * `original` again, a link left by an earlier relocation is dropped along with
- * its target, so the caller recreates a real directory there.
- *
- * Best-effort: a failure costs only the reclaim, never the launch.
+ * pruning reclaims it ({@link removeRelocatedRuntimeData}). Retargeting or
+ * returning to `original` keeps the previous Snap target recorded by a
+ * separate link until dead-scope pruning confirms no broker still uses it.
  */
 export async function placeRuntimeData(original: string, actual: string): Promise<void> {
+	const previous = await relocatedTarget(original);
+	if (actual === original) {
+		if (previous === undefined) return;
+		await retainRelocatedTarget(original, previous);
+		await fs.rm(original, { force: true });
+		return;
+	}
+	if ((await fs.readlink(original).catch(() => undefined)) === actual) return;
+	if (previous !== undefined) await retainRelocatedTarget(original, previous);
+	await fs.rm(original, { recursive: true, force: true });
 	try {
-		if (actual === original) {
-			const stale = await relocatedTarget(original);
-			if (stale === undefined) return;
-			await fs.rm(original, { force: true });
-			await fs.rm(stale, { recursive: true, force: true });
-			return;
-		}
-		if ((await fs.readlink(original).catch(() => undefined)) === actual) return;
-		await fs.rm(original, { recursive: true, force: true });
 		await fs.symlink(actual, original);
 	} catch (error) {
-		if (hasFsCode(error, "EEXIST")) return; // A concurrent client linked it first.
-		logger.warn("Failed to place daemon runtime data", {
-			original,
-			error: error instanceof Error ? error.message : String(error),
-		});
+		if (hasFsCode(error, "EEXIST") && (await fs.readlink(original).catch(() => undefined)) === actual) return;
+		throw error;
 	}
 }
 
-/** Remove the out-of-scope data that relocation links in `runtimeDir` point at; see {@link placeRuntimeData}. */
+/** Remove relocated profiles once the broker and all clients have left the scope; see {@link placeRuntimeData}. */
 export async function removeRelocatedRuntimeData(runtimeDir: string): Promise<void> {
 	for (const name of await fs.readdir(runtimeDir)) {
-		const target = await relocatedTarget(path.join(runtimeDir, name));
+		const marker = name.match(/^(.*)\.relocated\.[1-9]\d*$/);
+		const link = path.join(runtimeDir, name);
+		const original = path.join(runtimeDir, marker?.[1] ?? name);
+		const target = await relocatedTarget(link, original);
 		if (target !== undefined) await fs.rm(target, { recursive: true, force: true });
 	}
 }
