@@ -99,26 +99,44 @@ interface JudgmentAttempt extends Omit<JudgmentUsage, "purpose"> {
 }
 
 /** Session journal surface that records off-transcript model cost; journal-only managers omit it. */
-export type JudgmentUsageLedger = Pick<SessionManager, "appendModelUsage" | "getSessionId" | "getLeafId">;
+export type JudgmentUsageLedger = Pick<SessionManager, "appendModelUsage" | "getSessionId" | "getLeafId" | "getEntry">;
 
 function isUsageLedger(manager: Partial<JudgmentUsageLedger>): manager is JudgmentUsageLedger {
 	return (
-		manager.appendModelUsage !== undefined && manager.getSessionId !== undefined && manager.getLeafId !== undefined
+		manager.appendModelUsage !== undefined &&
+		manager.getSessionId !== undefined &&
+		manager.getLeafId !== undefined &&
+		manager.getEntry !== undefined
 	);
+}
+
+/** Whether `ancestorId` lies on the path from the root to `leafId` (inclusive). */
+function isOnBranch(manager: JudgmentUsageLedger, ancestorId: string | null, leafId: string | null): boolean {
+	if (ancestorId === null) return true;
+	for (let id = leafId; id !== null; id = manager.getEntry(id)?.parentId ?? null) {
+		if (id === ancestorId) return true;
+	}
+	return false;
 }
 
 /**
  * Build a {@link JudgeDeps.onUsage} that journals every billed judgment attempt
- * as a `model_usage` entry beneath the session leaf at record time, so
- * `getSessionStats()` counts it in session totals. Attempts that land after
- * the session changes are dropped by the ledger. Returns `undefined` when the
- * journal cannot record usage.
+ * as a `model_usage` entry, so `getSessionStats()` counts it in session totals.
+ * The session id and leaf are snapshotted when the callback is built: while the
+ * active branch still descends from that leaf, usage lands beneath the current
+ * leaf; after navigation to another branch it stays on the initiating branch,
+ * chained after the previous entry. Attempts that land after the session
+ * changes are dropped by the ledger. Returns `undefined` when the journal
+ * cannot record usage.
  */
 export function journalJudgmentUsage(manager: Partial<JudgmentUsageLedger> | undefined): JudgeDeps["onUsage"] {
 	if (!manager || !isUsageLedger(manager)) return undefined;
 	const sessionId = manager.getSessionId();
+	let anchorId = manager.getLeafId();
 	return usage => {
-		manager.appendModelUsage(usage, { sessionId, parentId: manager.getLeafId() });
+		const leafId = manager.getLeafId();
+		const parentId = isOnBranch(manager, anchorId, leafId) ? leafId : anchorId;
+		anchorId = manager.appendModelUsage(usage, { sessionId, parentId }) ?? anchorId;
 	};
 }
 

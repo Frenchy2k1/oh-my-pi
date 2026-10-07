@@ -374,6 +374,48 @@ describe("runEvalCompletion", () => {
 		expect(sessionManager.getUsageStatistics().output).toBe(5);
 	});
 
+	it("keeps a pending completion's usage on its initiating branch after navigation", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/fallback"] });
+		const sessionManager = SessionManager.inMemory();
+		session.sessionManager = sessionManager;
+		const root = sessionManager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+		const origin = sessionManager.appendMessage({ role: "user", content: "origin branch", timestamp: 2 });
+		const gate = Promise.withResolvers<AssistantMessage>();
+		vi.spyOn(ai, "completeSimple")
+			.mockReturnValueOnce(gate.promise)
+			.mockResolvedValueOnce(assistant({ text: "fallback answer", output: 7 }));
+
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		sessionManager.branch(root);
+		const other = sessionManager.appendMessage({ role: "user", content: "other branch", timestamp: 3 });
+		gate.resolve(assistant({ stopReason: "error", errorMessage: "quota exhausted", output: 3 }));
+		await getCompletionHandle(handle.id)?.promise;
+
+		const usage = sessionManager.getEntries().filter(entry => entry.type === "model_usage");
+		expect(usage.map(entry => entry.parentId)).toEqual([origin, usage[0]?.id]);
+		expect(sessionManager.getLeafId()).toBe(other);
+		expect(sessionManager.getBranch().some(entry => entry.type === "model_usage")).toBe(false);
+	});
+
+	it("journals a pending completion beneath the current leaf while its branch keeps growing", async () => {
+		const session = makeSession();
+		const sessionManager = SessionManager.inMemory();
+		session.sessionManager = sessionManager;
+		sessionManager.appendMessage({ role: "user", content: "start", timestamp: 1 });
+		const gate = Promise.withResolvers<AssistantMessage>();
+		vi.spyOn(ai, "completeSimple").mockReturnValueOnce(gate.promise);
+
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		const later = sessionManager.appendMessage({ role: "user", content: "same branch", timestamp: 2 });
+		gate.resolve(assistant({ text: "ok", output: 4 }));
+		await getCompletionHandle(handle.id)?.promise;
+
+		const usage = sessionManager.getBranch().filter(entry => entry.type === "model_usage");
+		expect(usage.map(entry => entry.parentId)).toEqual([later]);
+	});
+
 	it("inherits the failed candidate's effort for bare nested entries", async () => {
 		const thinking = {
 			api: "anthropic-messages",
