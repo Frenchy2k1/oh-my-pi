@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `omp commit` and `/git` now sign commits when Git's `commit.gpgsign` is enabled ([#14810](https://github.com/can1357/oh-my-pi/issues/14810)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Added
