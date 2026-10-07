@@ -107,6 +107,7 @@ it("preserves MCP routes in the first provider request after ACP session/load", 
 	});
 	const servers: McpServer[] = [{ type: "http", name: "demo", url: `http://127.0.0.1:${mcp.port}/`, headers: [] }];
 	const sessions: AgentSession[] = [];
+	const agents: AcpAgent[] = [];
 	try {
 		const factory = createAcpSessionFactory({
 			baseOptions: {
@@ -136,7 +137,7 @@ it("preserves MCP routes in the first provider request after ACP session/load", 
 		async function process(): Promise<AcpAgent> {
 			const initial = (await factory(dir.path())).session;
 			sessions.push(initial);
-			return new AcpAgent(
+			const agent = new AcpAgent(
 				connection,
 				async cwd => {
 					const created = await factory(cwd);
@@ -145,6 +146,8 @@ it("preserves MCP routes in the first provider request after ACP session/load", 
 				},
 				initial,
 			);
+			agents.push(agent);
+			return agent;
 		}
 		const first = await process();
 		const { sessionId } = await first.newSession({ cwd: dir.path(), mcpServers: servers });
@@ -153,7 +156,7 @@ it("preserves MCP routes in the first provider request after ACP session/load", 
 		if (!stored) throw new Error("ACP session was not created");
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
-		for (const session of sessions.splice(0)) await session.dispose();
+		await first.dispose();
 		const second = await process();
 		await second.loadSession({ sessionId, cwd: dir.path(), mcpServers: servers });
 		await second.prompt({ sessionId, prompt: [{ type: "text", text: "second" }] });
@@ -161,6 +164,7 @@ it("preserves MCP routes in the first provider request after ACP session/load", 
 		expect(requests[0].join("\n")).toContain("## MCP Tool Routes");
 		expect(requests[1]).toEqual(requests[0]);
 	} finally {
+		for (const agent of agents.reverse()) await agent.dispose();
 		for (const session of sessions) if (!session.isDisposed) await session.dispose();
 		mcp.stop(true);
 		settings.cancelPendingSaves();
