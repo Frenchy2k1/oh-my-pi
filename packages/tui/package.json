@@ -91,6 +91,10 @@
       "types": "./src/status-line/index.ts",
       "import": "./src/status-line/index.ts"
     },
+    "./native/*": {
+      "types": "./src/native/*.ts",
+      "import": "./src/native/*.ts"
+    },
     "./*": {
       "types": "./src/*.ts",
       "import": "./src/*.ts"

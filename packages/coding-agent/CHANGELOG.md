@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed `ask` questions in Tern covering the end of the transcript with a sheet that blocked scrolling, hiding the explanation the question was about; the question now sits in the composer's place, framed like the composer, below a transcript you can read and scroll while deciding ([#14812](https://github.com/can1357/oh-my-pi/pull/14812) by [@H4vC](https://github.com/H4vC))
+- Fixed extensions importing `@oh-my-pi/pi-tui/native/*` (e.g. `native/overlay`, `native/spans`) failing to load in the compiled `omp` binary with `Cannot find package '@oh-my-pi/pi-tui'` ([#14834](https://github.com/can1357/oh-my-pi/issues/14834))
 ### Changed
 
 - Generated session titles now carry their card in the title itself (`🧪 FLAKY: Fix flaky park tests`), so the `/resume` picker and session listings show the icon and short code too; `title.icons` applies to newly generated titles.
