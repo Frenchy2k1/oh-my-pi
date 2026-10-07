@@ -99,24 +99,15 @@ interface JudgmentAttempt extends Omit<JudgmentUsage, "purpose"> {
 }
 
 /** Session journal surface that records off-transcript model cost; journal-only managers omit it. */
-export type JudgmentUsageLedger = Pick<SessionManager, "appendModelUsage" | "getSessionId" | "getLeafId" | "getEntry">;
+export type JudgmentUsageLedger = Pick<SessionManager, "appendModelUsage" | "getSessionId" | "getLeafId" | "getBranch">;
 
 function isUsageLedger(manager: Partial<JudgmentUsageLedger>): manager is JudgmentUsageLedger {
 	return (
 		manager.appendModelUsage !== undefined &&
 		manager.getSessionId !== undefined &&
 		manager.getLeafId !== undefined &&
-		manager.getEntry !== undefined
+		manager.getBranch !== undefined
 	);
-}
-
-/** Whether `ancestorId` lies on the path from the root to `leafId` (inclusive). */
-function isOnBranch(manager: JudgmentUsageLedger, ancestorId: string | null, leafId: string | null): boolean {
-	if (ancestorId === null) return true;
-	for (let id = leafId; id !== null; id = manager.getEntry(id)?.parentId ?? null) {
-		if (id === ancestorId) return true;
-	}
-	return false;
 }
 
 /**
@@ -134,8 +125,10 @@ export function journalJudgmentUsage(manager: Partial<JudgmentUsageLedger> | und
 	const sessionId = manager.getSessionId();
 	let anchorId = manager.getLeafId();
 	return usage => {
-		const leafId = manager.getLeafId();
-		const parentId = isOnBranch(manager, anchorId, leafId) ? leafId : anchorId;
+		// `getBranch()` is the index's memoized walk; it stops at the first
+		// repeated id, so a corrupt cyclic parent chain cannot hang this check.
+		const onAnchorBranch = anchorId === null || manager.getBranch().some(entry => entry.id === anchorId);
+		const parentId = onAnchorBranch ? manager.getLeafId() : anchorId;
 		anchorId = manager.appendModelUsage(usage, { sessionId, parentId }) ?? anchorId;
 	};
 }
