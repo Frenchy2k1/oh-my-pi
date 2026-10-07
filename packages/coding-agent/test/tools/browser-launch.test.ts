@@ -9,7 +9,7 @@ import {
 	stealthIgnoreDefaultArgsForTest,
 	systemChromiumCandidatesForTest,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { computeExecutablePath, detectBrowserPlatform } from "@oh-my-pi/pi-utils/browsers";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { PUPPETEER_REVISIONS } from "puppeteer-core/internal/revisions.js";
@@ -60,6 +60,14 @@ describe("shared browser launch", () => {
 			else process.env.PUPPETEER_EXECUTABLE_PATH = previousExecutable;
 		}
 	};
+	// snapd keys `$SNAP_USER_COMMON` on the account's passwd home, which can differ from `HOME`.
+	const passwdHome = $which("getent")
+		? Bun.spawnSync(["getent", "passwd", String(process.getuid?.() ?? "")], { stderr: "ignore" })
+				.stdout.toString()
+				.trim()
+				.split(":")[5]
+		: undefined;
+	const accountHome = passwdHome || os.homedir();
 
 	it("suppresses the broker-owned blank startup window", async () => {
 		const launch = await withExecutable("/test/chrome", () =>
@@ -72,8 +80,8 @@ describe("shared browser launch", () => {
 	it("places a Snap-confined Chromium's profile under the snap's revision-independent common dir", async () => {
 		const profile = "/home/test/.omp/run/daemons/abc/omp.browser.headless.profile";
 		for (const [executablePath, expected] of [
-			["/snap/bin/chromium", path.join(os.homedir(), "snap/chromium/common/omp", profile)],
-			["/var/lib/snapd/snap/bin/chromium", path.join(os.homedir(), "snap/chromium/common/omp", profile)],
+			["/snap/bin/chromium", path.join(accountHome, "snap/chromium/common/omp", profile)],
+			["/var/lib/snapd/snap/bin/chromium", path.join(accountHome, "snap/chromium/common/omp", profile)],
 			["/usr/bin/chromium", profile],
 		] as const) {
 			const launch = await withExecutable(executablePath, () =>
@@ -84,6 +92,26 @@ describe("shared browser launch", () => {
 			expect(launch?.args).toContain(`--user-data-dir=${expected}`);
 		}
 	});
+
+	it.skipIf(process.platform !== "linux" || !passwdHome)(
+		"keys the Snap profile on the account home, not an overridden HOME",
+		async () => {
+			const previousHome = process.env.HOME;
+			const overriddenHome = path.join(os.tmpdir(), "omp-isolated", ".omp-home");
+			process.env.HOME = overriddenHome;
+			try {
+				const profile = "/home/test/.omp/run/daemons/abc/omp.browser.headless.profile";
+				const launch = await withExecutable("/snap/bin/chromium", () =>
+					resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
+				);
+				expect(launch?.userDataDir).toBe(path.join(accountHome, "snap/chromium/common/omp", profile));
+				expect(launch?.userDataDir.startsWith(overriddenHome)).toBe(false);
+			} finally {
+				if (previousHome === undefined) delete process.env.HOME;
+				else process.env.HOME = previousHome;
+			}
+		},
+	);
 
 	it("uses snapd's active alias owner instead of the launcher filename", async () => {
 		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
@@ -102,7 +130,7 @@ describe("shared browser launch", () => {
 			const launch = await withExecutable("/snap/bin/chrome", () =>
 				resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
 			);
-			const expected = path.join(os.homedir(), "snap/chromium/common/omp", profile);
+			const expected = path.join(accountHome, "snap/chromium/common/omp", profile);
 			expect(launch?.userDataDir).toBe(expected);
 			expect(launch?.args).toContain(`--user-data-dir=${expected}`);
 		} finally {
@@ -133,7 +161,7 @@ describe("shared browser launch", () => {
 					const spec = await withExecutable(executablePath, () =>
 						resolveSharedBrowserLaunchSpec({ headless: true, userDataDir: profile }),
 					);
-					const expected = path.join(os.homedir(), "snap/chromium/common/omp", profile);
+					const expected = path.join(accountHome, "snap/chromium/common/omp", profile);
 					expect(spec?.userDataDir).toBe(expected);
 					expect(spec?.args).toContain(`--user-data-dir=${expected}`);
 				}

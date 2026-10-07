@@ -621,6 +621,29 @@ async function snapNameForCommand(command: string): Promise<string> {
 }
 
 /**
+ * Passwd home of the current account. snapd derives `$SNAP_USER_COMMON` from
+ * it (Go `user.Current()`), not from an inherited `HOME` override.
+ */
+async function accountHomeDir(): Promise<string> {
+	const uid = process.getuid?.();
+	if (uid !== undefined) {
+		try {
+			const proc = Bun.spawn(["getent", "passwd", String(uid)], {
+				stdout: "pipe",
+				stderr: "ignore",
+				signal: AbortSignal.timeout(1_000),
+				killSignal: "SIGKILL",
+			});
+			const home = (await new Response(proc.stdout).text()).trim().split(":")[5];
+			if ((await proc.exited) === 0 && home) return home;
+		} catch {
+			// No getent (or NSS stalled): fall back to the inherited home.
+		}
+	}
+	return os.homedir();
+}
+
+/**
  * `$SNAP_USER_COMMON` for a Snap launcher, including symlink aliases and
  * shell wrappers that exec the launcher (as Ubuntu's chromium-browser does).
  * Strict confinement denies writes to hidden home dirs such as `~/.omp`.
@@ -630,7 +653,7 @@ async function snapUserCommonDir(executablePath: string): Promise<string | undef
 	for (let depth = 0; depth < 8; depth++) {
 		if (Object.hasOwn(SNAP_BIN_DIRS, path.dirname(candidate))) {
 			const snap = await snapNameForCommand(path.basename(candidate));
-			return path.join(os.homedir(), "snap", snap, "common");
+			return path.join(await accountHomeDir(), "snap", snap, "common");
 		}
 		try {
 			const stat = await fs.promises.lstat(candidate);
