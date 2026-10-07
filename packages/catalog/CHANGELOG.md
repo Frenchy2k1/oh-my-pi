@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Claude Haiku 5.5 throwing `AmbiguousOverlapError` when reasoning is enabled; it now resolves to adaptive thinking with `low`–`max` efforts ([#14854](https://github.com/can1357/oh-my-pi/issues/14854)).
+
 ## [18.8.2] - 2026-10-07
 
 ### Fixed

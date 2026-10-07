@@ -255,8 +255,11 @@ class "anthropic" {
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \
 		"google-vertex" "opencode-zen" "snowflake" "vercel-ai-gateway" {
+		// Haiku 5.5 moved to adaptive thinking; only pre-4.7 Haiku keeps budgets.
 		family "haiku" {
-			thinking-mode "budget"
+			revision "<4.7" {
+				thinking-mode "budget"
+			}
 		}
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \

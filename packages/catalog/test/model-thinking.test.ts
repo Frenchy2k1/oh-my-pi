@@ -994,6 +994,20 @@ describe("model thinking derivation", () => {
 		}
 	});
 
+	it("resolves Haiku 5.5 to the adaptive ladder while Haiku 4.5 keeps budgets", () => {
+		// The Haiku budget rule had no revision bound and tied with the >=4.7
+		// adaptive rule, so building Haiku 5.5 threw AmbiguousOverlapError (#14854).
+		const haiku55 = createModel({ id: "claude-haiku-5-5", api: "anthropic-messages", provider: "anthropic" });
+		expect(haiku55.thinking?.mode).toBe("anthropic-adaptive");
+		expect(haiku55.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+		const haiku45 = createModel({
+			id: "claude-haiku-4-5-20251001",
+			api: "anthropic-messages",
+			provider: "anthropic",
+		});
+		expect(haiku45.thinking?.mode).toBe("budget");
+	});
+
 	it("backfills wire facts onto explicit thinking, explicit values winning", () => {
 		// Authored partial ladders are authoritative; rules only fill fields
 		// the spec omitted.
