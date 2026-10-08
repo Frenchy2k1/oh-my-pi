@@ -402,6 +402,20 @@ class "anthropic" {
 				max-tokens 128000
 			}
 		}
+		// Anthropic cut Sonnet 5.5 cache reads to $0.10/MTok, 0.05x input, on
+		// 2026-10-07; upstream catalogs still carry the 0.1x $0.20 rate.
+		// Full payload so a discovery-sourced row is priced on every axis.
+		// https://platform.claude.com/docs/en/about-claude/pricing
+		family "sonnet" {
+			revision ">=5.5 <6" {
+				cost-patch {
+					input 2.0
+					output 10.0
+					cache-read 0.1
+					cache-write 2.5
+				}
+			}
+		}
 		// /v1/models reports neither reasoning, vision, pricing nor limits for
 		// Haiku 5.5, so a discovered row would materialize as a text-only,
 		// unpriced, non-reasoning model; pin the model card. Prompts over 100K

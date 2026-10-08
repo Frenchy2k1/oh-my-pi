@@ -195,11 +195,20 @@ provider "commandcode" {
 	// `inclusionai/ling-3.0-flash-sante:free`, `stealth/pixel-canary`,
 	// `stealth/space-bunny-alpha`) keep the zero discovery default.
 	// ---------------------------------------------------------------------------
-	models "claude-sonnet-5" "claude-sonnet-5-5" {
+	models "claude-sonnet-5" {
 		cost-patch {
 			input 2.0
 			output 10.0
 			cache-read 0.2
+			cache-write 2.5
+		}
+	}
+	// Anthropic list price (see header); cache reads cut to 0.1 on 2026-10-07.
+	models "claude-sonnet-5-5" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.1
 			cache-write 2.5
 		}
 	}
